@@ -944,24 +944,24 @@ int ObLoadDataDirectDemo::do_load()
       LOG_WARN("fail to close external sort", KR(ret));
     }
   }
-  // while (OB_SUCC(ret)) {
-  //   if (OB_FAIL(external_sort_.get_next_row(datum_row))) {
-  //     LOG_INFO("external_sort_.get_next_row");
-  //     if (OB_UNLIKELY(OB_ITER_END != ret)) {
-  //       LOG_WARN("fail to get next row", KR(ret));
-  //     } else {
-  //       ret = OB_SUCCESS;
-  //       break;
-  //     }
-  //   } else if (OB_FAIL(sstable_writer_.append_row(*datum_row))) {
-  //     LOG_WARN("fail to append row", KR(ret));
-  //   }
-  // }
-  // if (OB_SUCC(ret)) {
-  //   if (OB_FAIL(sstable_writer_.close())) {
-  //     LOG_WARN("fail to close sstable writer", KR(ret));
-  //   }
-  // }
+  while (OB_SUCC(ret)) {
+    if (OB_FAIL(external_sort_.get_next_row(datum_row))) {
+      LOG_INFO("external_sort_.get_next_row");
+      if (OB_UNLIKELY(OB_ITER_END != ret)) {
+        LOG_WARN("fail to get next row", KR(ret));
+      } else {
+        ret = OB_SUCCESS;
+        break;
+      }
+    } else if (OB_FAIL(sstable_writer_.append_row(*datum_row))) {
+      LOG_WARN("fail to append row", KR(ret));
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(sstable_writer_.close())) {
+      LOG_WARN("fail to close sstable writer", KR(ret));
+    }
+  }
   return ret;
 }
 
