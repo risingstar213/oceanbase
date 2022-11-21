@@ -25,6 +25,13 @@
 #include "blocksstable/ob_tmp_file.h"
 #include "share/config/ob_server_config.h"
 
+#include "lib/stat/ob_session_stat.h"
+#include "lib/worker.h"
+#include "lib/lock/ob_thread_cond.h"
+#include "share/ob_thread_pool.h"
+#include "observer/omt/ob_tenant.h"
+
+#include <queue>
 
 namespace oceanbase
 {
@@ -171,6 +178,8 @@ public:
   int64_t get_fd() const { return fd_; }
   int64_t get_dir_id() const { return dir_id_; }
   const T &get_sample_item() const { return sample_item_; }
+  int64_t get_expire_timestamp(){ return expire_timestamp_; }
+  uint64_t get_tenant_id() const { return tenant_id_; }
 private:
   int flush_buffer();
   int check_need_flush(bool &need_flush);
@@ -1006,11 +1015,12 @@ public:
   int64_t get_fragment_count();
   int add_fragment_iter(ObFragmentIterator<T> *iter);
   int transfer_final_sorted_fragment_iter(ObExternalSortRound &dest_round);
+  typedef ObFragmentWriterV2<T> FragmentWriter;
+  int set_writer(FragmentWriter *writer);
 private:
   typedef ObFragmentReaderV2<T> FragmentReader;
   typedef ObFragmentIterator<T> FragmentIterator;
   typedef common::ObArray<FragmentIterator *> FragmentIteratorList;
-  typedef ObFragmentWriterV2<T> FragmentWriter;
   typedef ObFragmentMerge<T, Compare> FragmentMerger;
   bool is_inited_;
   int64_t merge_count_;
@@ -1089,6 +1099,39 @@ int ObExternalSortRound<T, Compare>::add_item(const T &item)
     is_writer_opened_ = true;
     if (OB_FAIL(writer_.write_item(item))) {
       STORAGE_LOG(WARN, "fail to write item", K(ret));
+    }
+  }
+  return ret;
+}
+
+template<typename T, typename Compare>
+int ObExternalSortRound<T, Compare>::set_writer(FragmentWriter *writer)
+{
+  int ret = common::OB_SUCCESS;
+  void *buf = NULL;
+  FragmentReader *reader = NULL;
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = common::OB_NOT_INIT;
+    STORAGE_LOG(WARN, "ObExternalSortRound has not been inited", K(ret));
+  } else if (OB_ISNULL(buf = allocator_.alloc(sizeof(FragmentReader)))) {
+    ret = common::OB_ALLOCATE_MEMORY_FAILED;
+    STORAGE_LOG(WARN, "fail to allocate memory", K(ret));
+  } else if (OB_ISNULL(reader = new (buf) FragmentReader())) {
+    ret = common::OB_ALLOCATE_MEMORY_FAILED;
+    STORAGE_LOG(WARN, "fail to placement new FragmentReader", K(ret));
+  } else if (OB_FAIL(writer->sync())) {
+    STORAGE_LOG(WARN, "fail to sync macro file", K(ret));
+  } else {
+    STORAGE_LOG(INFO, "build fragment", K(writer->get_fd()), K(writer->get_sample_item()));
+    if (OB_FAIL(reader->init(writer->get_fd(), writer->get_dir_id(), writer->get_expire_timestamp(), writer->get_tenant_id(),
+        writer->get_sample_item(), file_buf_size_))) {
+      STORAGE_LOG(WARN, "fail to open reader", K(ret), K(file_buf_size_),
+          K(expire_timestamp_));
+    } else if (OB_FAIL(iters_.push_back(reader))) {
+      STORAGE_LOG(WARN, "fail to push back reader", K(ret));
+    } else {
+      // writer_.reset();
+      // is_writer_opened_ = false;
     }
   }
   return ret;
@@ -1200,6 +1243,7 @@ int ObExternalSortRound<T, Compare>::do_merge(
     int64_t reader_idx = 0;
     STORAGE_LOG(INFO, "external sort do merge start");
     while (OB_SUCC(ret) && reader_idx < iters_.count()) {
+      // merge fragnants of this round and copy it to next round
       if (OB_FAIL(do_one_run(reader_idx, next_round))) {
         STORAGE_LOG(WARN, "fail to do one run merge", K(ret));
       } else {
@@ -1229,6 +1273,7 @@ int ObExternalSortRound<T, Compare>::do_one_run(
   } else {
     int tmp_ret = OB_SUCCESS;
     const int64_t end_reader_idx = std::min(start_reader_idx + merge_count_, iters_.count());
+    // copy list from this round to merger
     FragmentIteratorList iters;
     for (int64_t i = start_reader_idx; OB_SUCC(ret) && i < end_reader_idx; ++i) {
       if (OB_FAIL(iters.push_back(iters_.at(i)))) {
@@ -1919,6 +1964,638 @@ int ObExternalSort<T, Compare>::transfer_final_sorted_fragment_iter(
   }
   return ret;
 }
+// pipeline
+template<typename T, typename Compare>
+class ObMemorySortRoundV1
+{
+public:
+  typedef ObExternalSortRound<T, Compare> ExternalSortRound;
+  typedef ObFragmentWriterV2<T> FragmentWriter;
+  ObMemorySortRoundV1();
+  virtual ~ObMemorySortRoundV1();
+
+  int init(const int64_t mem_limit, const int64_t expire_timestamp,Compare *compare,
+    const int64_t file_buf_size, const uint64_t tenant_id);
+  bool need_flush(const T &item);
+  int add_item(const T &item);
+  int build_fragment();
+  int writer_add_item(const T &item);
+  int build_next_round(ExternalSortRound *round);
+private:
+  bool is_inited_;
+  bool is_in_memory_;
+  bool has_data_;
+  int64_t buf_mem_limit_;
+  int64_t expire_timestamp_;
+  common::ObArenaAllocator allocator_;
+  common::ObVector<T *> item_list_;
+  Compare *compare_;
+  FragmentWriter writer_;
+  bool is_writer_opened_;
+  int64_t file_buf_size_;
+  uint64_t tenant_id_;
+  int64_t dir_id_;
+};
+
+template<typename T, typename Compare>
+ObMemorySortRoundV1<T, Compare>::ObMemorySortRoundV1()
+  : is_inited_(false), is_in_memory_(false), has_data_(false), buf_mem_limit_(0), expire_timestamp_(0),
+    allocator_(common::ObNewModIds::OB_ASYNC_EXTERNAL_SORTER, common::OB_MALLOC_BIG_BLOCK_SIZE), item_list_(NULL, common::ObNewModIds::OB_ASYNC_EXTERNAL_SORTER),
+    compare_(NULL), writer_(), is_writer_opened_(false), file_buf_size_(0),
+    tenant_id_(common::OB_INVALID_ID), dir_id_(-1)
+{
+}
+
+template<typename T, typename Compare>
+ObMemorySortRoundV1<T, Compare>::~ObMemorySortRoundV1()
+{
+}
+
+template<typename T, typename Compare>
+int ObMemorySortRoundV1<T, Compare>::init(
+    const int64_t mem_limit, const int64_t expire_timestamp,
+    Compare *compare, const int64_t file_buf_size,
+    const uint64_t tenant_id)
+{
+  int ret = common::OB_SUCCESS;
+  if (OB_UNLIKELY(is_inited_)) {
+    ret = common::OB_INIT_TWICE;
+    STORAGE_LOG(WARN, "ObMemorySortRound has been inited", K(ret));
+  } else if (mem_limit < ObExternalSortConstant::MIN_MEMORY_LIMIT
+      || NULL == compare) {
+    ret = common::OB_INVALID_ARGUMENT;
+    STORAGE_LOG(WARN, "invalid arguments", K(ret), K(mem_limit), KP(compare));
+  } else if (OB_FAIL(FILE_MANAGER_INSTANCE_V2.alloc_dir(dir_id_))) {
+    STORAGE_LOG(WARN, "fail to alloc dir", K(ret));
+  } else {
+    is_inited_ = true;
+    is_in_memory_ = false;
+    has_data_ = false;
+    buf_mem_limit_ = mem_limit;
+    expire_timestamp_ = expire_timestamp;
+    compare_ = compare;
+    is_writer_opened_ = false;
+    file_buf_size_ = file_buf_size;
+    tenant_id_ = tenant_id;
+  }
+  return ret;
+}
+
+template<typename T, typename Compare>
+bool ObMemorySortRoundV1<T, Compare>::need_flush(const T &item)
+{
+  const int64_t item_size = sizeof(T) + item.get_deep_copy_size();
+  if (allocator_.used() + item_size > buf_mem_limit_) {
+    return true;
+  }
+  return false;
+}
+
+template<typename T, typename Compare>
+int ObMemorySortRoundV1<T, Compare>::add_item(const T &item)
+{
+  int ret = common::OB_SUCCESS;
+  const int64_t item_size = sizeof(T) + item.get_deep_copy_size();
+  char *buf = NULL;
+  T *new_item = NULL;
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = common::OB_NOT_INIT;
+    STORAGE_LOG(WARN, "ObMemorySortRound has not been inited", K(ret));
+  } else if (ObExternalSortConstant::is_timeout(expire_timestamp_)) {
+    ret = common::OB_TIMEOUT;
+    STORAGE_LOG(WARN, "ObMemorySortRound timeout", K(ret), K(expire_timestamp_));
+  } else if (item_size > buf_mem_limit_) {
+    ret = common::OB_BUF_NOT_ENOUGH;
+    STORAGE_LOG(WARN, "invalid item size, must not larger than buf memory limit",
+        K(ret), K(item_size), K(buf_mem_limit_));
+  } else if (allocator_.used() + item_size > buf_mem_limit_) {
+    STORAGE_LOG(WARN, "fail to build fragment", K(ret));
+  } else if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(item_size)))) {
+    ret = common::OB_ALLOCATE_MEMORY_FAILED;
+    STORAGE_LOG(WARN, "fail to allocate memory", K(ret), K(item_size));
+  } else if (OB_ISNULL(new_item = new (buf) T())) {
+    ret = common::OB_ALLOCATE_MEMORY_FAILED;
+    STORAGE_LOG(WARN, "fail to placement new item", K(ret));
+  } else {
+    int64_t buf_pos = sizeof(T);
+    if (OB_FAIL(new_item->deep_copy(item, buf, item_size, buf_pos))) {
+      STORAGE_LOG(WARN, "fail to deep copy item", K(ret));
+    } else if (OB_FAIL(item_list_.push_back(new_item))) {
+      STORAGE_LOG(WARN, "fail to push back new item", K(ret));
+    }
+  }
+  return ret;
+}
+
+template<typename T, typename Compare>
+int ObMemorySortRoundV1<T, Compare>::build_fragment()
+{
+  int ret = common::OB_SUCCESS;
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = common::OB_NOT_INIT;
+    STORAGE_LOG(WARN, "ObMemorySortRound has not been inited", K(ret));
+  } else if (item_list_.size() > 0) {
+    int64_t start = common::ObTimeUtility::current_time();
+    std::sort(item_list_.begin(), item_list_.end(), *compare_);
+    if (OB_FAIL(compare_->result_code_)) {
+      ret = compare_->result_code_;
+    } else {
+      const int64_t sort_fragment_time = common::ObTimeUtility::current_time() - start;
+      STORAGE_LOG(INFO, "ObMemorySortRound", K(sort_fragment_time));
+    }
+
+    // start = common::ObTimeUtility::current_time();
+    // for (int64_t i = 0; OB_SUCC(ret) && i < item_list_.size(); ++i) {
+    //   if (OB_FAIL(writer_add_item(*item_list_.at(i)))) {
+    //     STORAGE_LOG(WARN, "fail to add item", K(ret));
+    //   }
+    // }
+
+
+    // if (OB_SUCC(ret)) {
+      
+    //   if (OB_FAIL(external_sort->build_fragment())) {
+    //     STORAGE_LOG(WARN, "fail to build fragment", K(ret));
+    //   } else {
+    //     const int64_t write_fragment_time = common::ObTimeUtility::current_time() - start;
+    //     STORAGE_LOG(INFO, "ObMemorySortRound", K(write_fragment_time));
+    //     item_list_.reset();
+    //     allocator_.reuse();
+    //   }
+    // }
+  }
+  return ret;
+}
+
+template<typename T, typename Compare>
+int ObMemorySortRoundV1<T, Compare>::writer_add_item(const T &item)
+{
+  int ret = common::OB_SUCCESS;
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = common::OB_NOT_INIT;
+    STORAGE_LOG(WARN, "ObExternalSortRound has not been inited", K(ret));
+  } else if (ObExternalSortConstant::is_timeout(expire_timestamp_)) {
+    ret = common::OB_TIMEOUT;
+    STORAGE_LOG(WARN, "ObExternalSortRound timeout", K(ret), K(expire_timestamp_));
+  } else if (!is_writer_opened_ && OB_FAIL(writer_.open(file_buf_size_,
+      expire_timestamp_, tenant_id_, dir_id_))) {
+    STORAGE_LOG(WARN, "fail to open writer", K(ret), K_(tenant_id), K_(dir_id));
+  } else {
+    is_writer_opened_ = true;
+    if (OB_FAIL(writer_.write_item(item))) {
+      STORAGE_LOG(WARN, "fail to write item", K(ret));
+    }
+  }
+  return ret;
+}
+
+template<typename T, typename Compare>
+int ObMemorySortRoundV1<T, Compare>::build_next_round(ExternalSortRound *round)
+{
+  int ret = OB_SUCCESS;
+  int start = common::ObTimeUtility::current_time();
+  for (int64_t i = 0; OB_SUCC(ret) && i < item_list_.size(); ++i) {
+    if (OB_FAIL(writer_add_item(*item_list_.at(i)))) {
+      STORAGE_LOG(WARN, "fail to add item", K(ret));
+    }
+  }
+  if (OB_SUCC(ret)) {
+      
+    if (OB_FAIL(round->set_writer(&writer_))) {
+      STORAGE_LOG(WARN, "fail to build fragment", K(ret));
+    } else {
+      const int64_t write_fragment_time = common::ObTimeUtility::current_time() - start;
+      STORAGE_LOG(INFO, "ObMemorySortRound", K(write_fragment_time));
+      item_list_.reset();
+      allocator_.reuse();
+    }
+  }
+  return ret;
+}
+
+
+template<typename T, typename Compare>
+class ObWriterStage : public share::ObThreadPool
+{
+public:
+  typedef ObMemorySortRoundV1<T, Compare> MemorySortRound;
+
+  typedef ObExternalSortRound<T, Compare> ExternalSortRound;
+  void run1() override
+  {
+    // init the environment
+    common::ObTenantStatEstGuard stat_est_quard(MTL_ID());
+    share::ObTenantBase *tenant_base = MTL_CTX();
+    lib::Worker::CompatMode mode = ((omt::ObTenant *)tenant_base)->get_compat_mode();
+    lib::Worker::set_compatibility_mode(mode);
+    // do work
+    while (true)
+    {
+      cond_.lock();
+
+      while(memory_rounds_.empty() && !has_stopped_) {
+        cond_.wait();
+      }
+
+      // if (memory_rounds_.empty()) {
+      //   cond_.unlock();
+      //   break;
+      // }
+
+      if (has_stopped_) {
+        cond_.unlock();
+        break;
+      }
+      run_count_ += 1;
+
+      MemorySortRound *this_round = memory_rounds_.front();
+      memory_rounds_.pop();
+
+      cond_.unlock();
+      this_round->build_next_round(next_round_);
+
+      delete this_round;
+
+      cond_.lock();
+      run_count_ -= 1;
+      cond_.unlock();
+
+    }
+  }
+
+  void add_memory_round(MemorySortRound *round)
+  {
+    cond_.lock();
+    memory_rounds_.push(round);
+    cond_.unlock();
+
+    cond_.signal();
+  }
+
+  void set_external_sort(ExternalSortRound *external_round)
+  {
+    next_round_ = external_round;
+  }
+  void wait_for_stop()
+  {
+    while (!memory_rounds_.empty() || run_count_ != 0) {
+      if (run_count_ == 0) {
+        cond_.signal();
+      }
+    }
+    stop();
+    has_stopped_ = true;
+    cond_.broadcast();
+  }
+
+  void init()
+  {
+    cond_.init(ObWaitEventIds::DEFAULT_COND_WAIT);
+  }
+private:
+  common::ObThreadCond cond_;
+  std::queue<MemorySortRound *> memory_rounds_;
+  ExternalSortRound *next_round_;
+  int run_count_ = 0;
+  bool has_stopped_ = false;
+};
+
+template<typename T, typename Compare>
+class ObMemorySortStage : public share::ObThreadPool {
+public:
+  typedef ObMemorySortRoundV1<T, Compare> MemorySortRound;
+
+  typedef ObExternalSortRound<T, Compare> ExternalSortRound;
+  typedef ObWriterStage<T, Compare> WriterStage;
+  void run1() override
+  {
+    // init the environment
+    common::ObTenantStatEstGuard stat_est_quard(MTL_ID());
+    share::ObTenantBase *tenant_base = MTL_CTX();
+    lib::Worker::CompatMode mode = ((omt::ObTenant *)tenant_base)->get_compat_mode();
+    lib::Worker::set_compatibility_mode(mode);
+    // do work
+    while (true)
+    {
+      cond_.lock();
+
+      while(memory_rounds_.empty() && !has_stopped_) {
+        cond_.wait();
+      }
+      // if (memory_rounds_.empty()) {
+      //   cond_.unlock();
+      //   break;
+      // }
+
+      if (has_stopped_) {
+        cond_.unlock();
+        break;
+      }
+      run_count_ += 1;
+      MemorySortRound *this_round = memory_rounds_.front();
+      memory_rounds_.pop();
+      cond_.unlock();
+
+      this_round->build_fragment();
+      next_stage_->add_memory_round(this_round);
+
+      cond_.lock();
+      run_count_ -= 1;
+      cond_.unlock();
+    }
+  }
+
+  void add_memory_round(MemorySortRound *round)
+  {
+    cond_.lock();
+    memory_rounds_.push(round);
+    cond_.unlock();
+
+    cond_.signal();
+  }
+
+  void set_next_stage(WriterStage *stage)
+  {
+    next_stage_ = stage;
+  }
+  void wait_for_stop()
+  {
+    while (!memory_rounds_.empty() || run_count_ != 0) {
+      if (run_count_ == 0) {
+        cond_.signal();
+      }
+    }
+    stop();
+    has_stopped_ = true;
+    cond_.broadcast();
+  }
+
+  void init()
+  {
+    cond_.init(ObWaitEventIds::DEFAULT_COND_WAIT);
+  }
+private:
+  common::ObThreadCond cond_;
+  std::queue<MemorySortRound *> memory_rounds_;
+  WriterStage *next_stage_;
+  int run_count_ = 0;
+  bool has_stopped_ = false;
+};
+
+template<typename T, typename Compare>
+class ObExternalSortV1
+{
+public:
+  typedef ObMemorySortRoundV1<T, Compare> MemorySortRound;
+  typedef ObMemorySortStage<T, Compare> MemorySortStage;
+  typedef ObWriterStage<T, Compare> WriterStage;
+  typedef ObExternalSortRound<T, Compare> ExternalSortRound;
+  ObExternalSortV1();
+  virtual ~ObExternalSortV1();
+  int init(const int64_t mem_limit, const int64_t file_buf_size, const int64_t expire_timestamp,
+      const uint64_t tenant_id, Compare *compare);
+  int add_item(const T &item);
+  int do_sort(const bool final_merge);
+  int get_next_item(const T *&item);
+  void clean_up();
+  TO_STRING_KV(K(is_inited_), K(file_buf_size_), K(buf_mem_limit_), K(expire_timestamp_),
+      K(merge_count_per_round_), KP(tenant_id_), KP(compare_));
+private:
+  int memory_add_item(const T &item);
+  static const int64_t EXTERNAL_SORT_ROUND_CNT = 2;
+  bool is_inited_;
+  int64_t file_buf_size_;
+  int64_t buf_mem_limit_;
+  int64_t expire_timestamp_;
+  int64_t merge_count_per_round_;
+  Compare *compare_;
+  MemorySortStage memory_stage_;
+  WriterStage writer_stage_;
+  MemorySortRound *memory_round_;
+  ExternalSortRound sort_rounds_[EXTERNAL_SORT_ROUND_CNT];
+  ExternalSortRound *curr_round_;
+  ExternalSortRound *next_round_;
+  bool is_empty_;
+  uint64_t tenant_id_;
+  int memory_round_num_ = 0;
+};
+
+template<typename T, typename Compare>
+ObExternalSortV1<T, Compare>::ObExternalSortV1()
+  : is_inited_(false), file_buf_size_(0), buf_mem_limit_(0), expire_timestamp_(0), merge_count_per_round_(0),
+    compare_(NULL), memory_stage_(), memory_round_(NULL), curr_round_(NULL), next_round_(NULL),
+    is_empty_(true), tenant_id_(common::OB_INVALID_ID)
+{
+}
+
+template<typename T, typename Compare>
+ObExternalSortV1<T, Compare>::~ObExternalSortV1()
+{
+}
+
+template<typename T, typename Compare>
+int ObExternalSortV1<T, Compare>::init(
+    const int64_t mem_limit, const int64_t file_buf_size, const int64_t expire_timestamp,
+    const uint64_t tenant_id, Compare *compare)
+{
+  int ret = common::OB_SUCCESS;
+  int64_t macro_block_size = OB_SERVER_BLOCK_MGR.get_macro_block_size();
+  if (OB_UNLIKELY(is_inited_)) {
+    ret = common::OB_INIT_TWICE;
+    STORAGE_LOG(WARN, "ObExternalSort has already been inited", K(ret));
+  } else if (mem_limit < ObExternalSortConstant::MIN_MEMORY_LIMIT
+      || file_buf_size % DIO_ALIGN_SIZE != 0
+      || file_buf_size < macro_block_size
+      || common::OB_INVALID_ID == tenant_id
+      || NULL == compare) {
+    ret = common::OB_INVALID_ARGUMENT;
+    STORAGE_LOG(WARN, "invalid argument", K(ret), K(mem_limit),
+        K(file_buf_size), KP(compare));
+  } else {
+    file_buf_size_ = common::lower_align(file_buf_size, macro_block_size);
+    buf_mem_limit_ = mem_limit;
+    expire_timestamp_ = expire_timestamp;
+    merge_count_per_round_ = buf_mem_limit_ / file_buf_size_ / 2;
+    compare_ = compare;
+    tenant_id_ = tenant_id;
+    curr_round_ = &sort_rounds_[0];
+    next_round_ = &sort_rounds_[1];
+    is_empty_ = true;
+
+    // initiate the thread pool
+    memory_stage_.set_next_stage(&writer_stage_);
+    memory_stage_.set_thread_count(4);
+    memory_stage_.set_run_wrapper(MTL_CTX());
+    memory_stage_.init();
+
+    writer_stage_.set_external_sort(curr_round_);
+    writer_stage_.set_thread_count(1);
+    writer_stage_.set_run_wrapper(MTL_CTX());
+    writer_stage_.init();
+
+    if (merge_count_per_round_ < ObExternalSortConstant::MIN_MULTIPLE_MERGE_COUNT) {
+      ret = common::OB_INVALID_ARGUMENT;
+      STORAGE_LOG(WARN, "invalid argument, invalid memory limit", K(ret),
+          K(buf_mem_limit_), K(file_buf_size_), K(merge_count_per_round_));
+    } else if (OB_FAIL(curr_round_->init(merge_count_per_round_, file_buf_size_,
+        expire_timestamp, tenant_id_, compare_))) {
+      STORAGE_LOG(WARN, "fail to init current sort round", K(ret));
+    // } else if (OB_FAIL(memory_sort_round_.init(buf_mem_limit_,
+    //     expire_timestamp, compare_, curr_round_))) {
+    //   STORAGE_LOG(WARN, "fail to init memory sort round", K(ret));
+
+
+    } else if(OB_FAIL(memory_stage_.start())) {
+      STORAGE_LOG(WARN, "fail to start memory sort thread pool", K(ret));
+    }  else if(OB_FAIL(writer_stage_.start())) {
+      STORAGE_LOG(WARN, "fail to start writer sort thread pool", K(ret));
+    } else {
+      is_inited_ = true;
+    }
+  }
+  return ret;
+}
+
+template<typename T, typename Compare>
+int ObExternalSortV1<T, Compare>::memory_add_item(const T &item)
+{
+  int ret = common::OB_SUCCESS;
+  if (NULL == memory_round_)
+  {
+    memory_round_ = new MemorySortRound();
+    if (OB_FAIL(memory_round_->init(buf_mem_limit_, expire_timestamp_, compare_, file_buf_size_, tenant_id_))) {
+      STORAGE_LOG(WARN, "fail to init memory sort round", K(ret));
+      return ret;
+    }
+  }
+  while (true)
+  {
+    if (!memory_round_->need_flush(item)) {
+      if (OB_FAIL(memory_round_->add_item(item))) {
+        STORAGE_LOG(WARN, "fail to add item in memory sort round", K(ret));
+      }
+      break;
+    }
+    memory_stage_.add_memory_round(memory_round_);
+
+    // For test
+    // memory_stage_.run1();
+    // writer_stage_.run1();
+
+    memory_round_ = new MemorySortRound();
+    if (OB_FAIL(memory_round_->init(buf_mem_limit_, expire_timestamp_, compare_, file_buf_size_, tenant_id_))) {
+      STORAGE_LOG(WARN, "fail to init memory sort round", K(ret));
+      return ret;
+    }
+  }
+  return ret;
+}
+
+template<typename T, typename Compare>
+int ObExternalSortV1<T, Compare>::add_item(const T &item)
+{
+  int ret = common::OB_SUCCESS;
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = common::OB_NOT_INIT;
+    STORAGE_LOG(WARN, "ObExternalSort has not been inited", K(ret));
+  } else if (OB_FAIL(memory_add_item(item))) {
+    STORAGE_LOG(WARN, "fail to add item in memory sort round", K(ret));
+  }
+  return ret;
+}
+
+template<typename T, typename Compare>
+int ObExternalSortV1<T, Compare>::do_sort(const bool final_merge)
+{
+  int ret = common::OB_SUCCESS;
+  if (NULL != memory_round_) {
+    memory_stage_.add_memory_round(memory_round_);
+    memory_stage_.wait_for_stop();
+    memory_stage_.wait();
+    writer_stage_.wait_for_stop();
+    writer_stage_.wait();
+    // memory_stage_.run1();
+    // writer_stage_.run1();
+  }
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = common::OB_NOT_INIT;
+    STORAGE_LOG(WARN, "ObExternalSort has not been inited", K(ret));
+  } else if (0 == curr_round_->get_fragment_count()) {
+    is_empty_ = true;
+    ret = common::OB_SUCCESS;
+  } else {
+    // final_merge = true is for performance optimization, the count of fragments is reduced to lower than merge_count_per_round,
+    // then the last round of merge this fragment is skipped
+    const int64_t final_round_limit = final_merge ? merge_count_per_round_ : 1;
+    int64_t round_id = 1;
+    is_empty_ = false;
+    while (OB_SUCC(ret) && curr_round_->get_fragment_count() > final_round_limit) {
+      const int64_t start_time = common::ObTimeUtility::current_time();
+      STORAGE_LOG(INFO, "do sort start round", K(round_id));
+      if (OB_FAIL(next_round_->init(merge_count_per_round_, file_buf_size_,
+          expire_timestamp_, tenant_id_, compare_))) {
+        STORAGE_LOG(WARN, "fail to init next sort round", K(ret));
+      } else if (OB_FAIL(curr_round_->do_merge(*next_round_))) {
+        STORAGE_LOG(WARN, "fail to do merge fragments of current round", K(ret));
+      } else if (OB_FAIL(curr_round_->clean_up())) {
+        STORAGE_LOG(WARN, "fail to do clean up of current round", K(ret));
+      } else {
+        std::swap(curr_round_, next_round_);
+        const int64_t round_cost_time = common::ObTimeUtility::current_time() - start_time;
+        STORAGE_LOG(INFO, "do sort end round", K(round_id), K(round_cost_time));
+        ++round_id;
+      }
+    }
+
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(curr_round_->build_merger())) {
+        STORAGE_LOG(WARN, "fail to build merger", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+template<typename T, typename Compare>
+int ObExternalSortV1<T, Compare>::get_next_item(const T *&item)
+{
+  int ret = common::OB_SUCCESS;
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = common::OB_NOT_INIT;
+    STORAGE_LOG(WARN, "ObExternalSort has not been inited", K(ret));
+  } else if (is_empty_) {
+    ret = common::OB_ITER_END;
+  } else if (OB_FAIL(curr_round_->get_next_item(item))) {
+    if (common::OB_ITER_END != ret) {
+      STORAGE_LOG(WARN, "fail to get next item", K(ret));
+    }
+  }
+  return ret;
+}
+
+template<typename T, typename Compare>
+void ObExternalSortV1<T, Compare>::clean_up()
+{
+  int tmp_ret = common::OB_SUCCESS;
+  is_inited_ = false;
+  file_buf_size_ = 0;
+  buf_mem_limit_ = 0;
+  expire_timestamp_ = 0;
+  merge_count_per_round_ = 0;
+  compare_ = NULL;
+  memory_round_ = NULL;
+  curr_round_ = NULL;
+  next_round_ = NULL;
+  is_empty_ = true;
+  STORAGE_LOG(INFO, "do external sort clean up");
+  for (int64_t i = 0; i < EXTERNAL_SORT_ROUND_CNT; ++i) {
+    // ignore ret
+    if (sort_rounds_[i].is_inited() && common::OB_SUCCESS != (tmp_ret = sort_rounds_[i].clean_up())) {
+      STORAGE_LOG(WARN, "fail to clean up sort rounds", K(tmp_ret), K(i));
+    }
+  }
+}
+
 
 }  // end namespace storage
 }  // end namespace oceanbase

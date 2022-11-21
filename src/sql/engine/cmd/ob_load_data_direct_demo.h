@@ -13,42 +13,111 @@ namespace oceanbase
 namespace sql
 {
 
-class ObLoadDataBuffer
+class ObLoadDataBufferV1
 {
 public:
-  ObLoadDataBuffer();
-  ~ObLoadDataBuffer();
-  void reuse();
+  ObLoadDataBufferV1();
+  ~ObLoadDataBufferV1();
+  // no reuse in ObLoadDataBufferV1
+  // void reuse();
   void reset();
-  int create(int64_t capacity);
-  int squash();
+  int init(int64_t capacity);
+  void set_data(char *data);
+  void set_begin(int64_t begin) {
+    begin_pos_ = begin;
+  }
+  void set_capacity(int64_t capacity) {
+    capacity_ = capacity;
+  }
   OB_INLINE char *data() const { return data_; }
   OB_INLINE char *begin() const { return data_ + begin_pos_; }
-  OB_INLINE char *end() const { return data_ + end_pos_; }
-  OB_INLINE bool empty() const { return end_pos_ == begin_pos_; }
-  OB_INLINE int64_t get_data_size() const { return end_pos_ - begin_pos_; }
-  OB_INLINE int64_t get_remain_size() const { return capacity_ - end_pos_; }
-  OB_INLINE void consume(int64_t size) { begin_pos_ += size; }
-  OB_INLINE void produce(int64_t size) { end_pos_ += size; }
+  OB_INLINE int64_t begin_pos() const { return begin_pos_; }
+  OB_INLINE char *end() const { return data_ + capacity_; }
+  OB_INLINE bool empty() const { return capacity_ == begin_pos_; }
+  // get capacity
+  OB_INLINE int64_t get_capacity() const {
+    return capacity_;
+  }
+  // get remaining data
+  OB_INLINE int64_t get_remain_size() const {
+    if (NULL == data_) {
+      return 0;
+    }
+    return capacity_ - begin_pos_;
+  }
+  OB_INLINE void consume(int64_t size) {
+    begin_pos_ += size;
+  }
 private:
-  common::ObArenaAllocator allocator_;
   char *data_;
-  int64_t begin_pos_;
-  int64_t end_pos_;
+  int64_t begin_pos_; //  now size
+  // int64_t end_pos_;
   int64_t capacity_;
 };
 
-class ObLoadSequentialFileReader
+class ObLoadDataBufferV2
 {
 public:
-  ObLoadSequentialFileReader();
-  ~ObLoadSequentialFileReader();
-  int open(const ObString &filepath);
-  int read_next_buffer(ObLoadDataBuffer &buffer);
+  ObLoadDataBufferV2();
+  ~ObLoadDataBufferV2();
+  // no reuse in ObLoadDataBufferV1
+  // void reuse();
+  void reset();
+  int init(int64_t capacity);
+  void set_data(char *data);
+  void set_begin(int64_t begin) {
+    begin_pos_ = begin;
+  }
+  void set_real_size(int64_t real_size) {
+    real_size_ = real_size;
+  }
+  OB_INLINE char *data() const { return data_; }
+  OB_INLINE char *begin() const { return data_ + begin_pos_; }
+  OB_INLINE int64_t begin_pos() const { return begin_pos_; }
+  OB_INLINE char *end() const { return data_ + real_size_; }
+  OB_INLINE bool empty() const { return real_size_ == begin_pos_; }
+  // get capacity
+  OB_INLINE int64_t get_capacity() const {
+    return capacity_;
+  }
+  // get real size
+  OB_INLINE int64_t get_real_size() const {
+    return real_size_;
+  }
+  // get remaining data
+  OB_INLINE int64_t get_remain_size() const {
+    if (NULL == data_) {
+      return 0;
+    }
+    return real_size_ - begin_pos_;
+  }
+  OB_INLINE void consume(int64_t size) {
+    begin_pos_ += size;
+  }
 private:
-  common::ObFileReader file_reader_;
-  int64_t offset_;
-  bool is_read_end_;
+  char *data_;
+  int64_t begin_pos_;
+  int64_t capacity_;
+  int64_t real_size_;
+};
+
+
+class ObLoadFileReaderV1
+{
+  static const int OPEN_FLAGS = O_RDONLY;
+  // static const int OPEN_MODE;
+public:
+  ObLoadFileReaderV1();
+  ~ObLoadFileReaderV1();
+  void reset();
+  int open(const ObString &filepath);
+  int read_next_buffer(ObLoadDataBufferV1 &buffer);
+  int read_next_buffer_v2(ObLoadDataBufferV2 &buffer);
+private:
+  int fd_;
+  int offset_;
+  int len_;
+  bool is_read_ended_;
 };
 
 class ObLoadCSVPaser
@@ -59,7 +128,8 @@ public:
   void reset();
   int init(const ObDataInFileStruct &format, int64_t column_count,
            common::ObCollationType collation_type);
-  int get_next_row(ObLoadDataBuffer &buffer, const common::ObNewRow *&row);
+  int get_next_row(ObLoadDataBufferV1 &buffer, const common::ObNewRow *&row);
+  int get_next_row_v2(ObLoadDataBufferV2 &buffer, const common::ObNewRow *&row);
 private:
   struct UnusedRowHandler
   {
@@ -155,7 +225,7 @@ private:
   common::ObArenaAllocator allocator_;
   blocksstable::ObStorageDatumUtils datum_utils_;
   ObLoadDatumRowCompare compare_;
-  storage::ObExternalSort<ObLoadDatumRow, ObLoadDatumRowCompare> external_sort_;
+  storage::ObExternalSortV1<ObLoadDatumRow, ObLoadDatumRowCompare> external_sort_;
   bool is_closed_;
   bool is_inited_;
 };
@@ -202,8 +272,10 @@ private:
   int do_load();
 private:
   ObLoadCSVPaser csv_parser_;
-  ObLoadSequentialFileReader file_reader_;
-  ObLoadDataBuffer buffer_;
+  // ObLoadSequentialFileReader file_reader_;
+  // ObLoadDataBuffer buffer_;
+  ObLoadFileReaderV1 file_reader_;
+  ObLoadDataBufferV1 buffer_;
   ObLoadRowCaster row_caster_;
   ObLoadExternalSort external_sort_;
   ObLoadSSTableWriter sstable_writer_;
