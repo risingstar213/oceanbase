@@ -1130,7 +1130,7 @@ int ObExternalSortRound<T, Compare>::set_writer(FragmentWriter *writer)
     } else if (OB_FAIL(iters_.push_back(reader))) {
       STORAGE_LOG(WARN, "fail to push back reader", K(ret));
     } else {
-      // writer_.reset();
+      writer->reset();
       // is_writer_opened_ = false;
     }
   }
@@ -2166,8 +2166,9 @@ int ObMemorySortRoundV1<T, Compare>::build_next_round(ExternalSortRound *round)
     } else {
       const int64_t write_fragment_time = common::ObTimeUtility::current_time() - start;
       STORAGE_LOG(INFO, "ObMemorySortRound", K(write_fragment_time));
+      is_writer_opened_ = false;
       item_list_.reset();
-      allocator_.reuse();
+      allocator_.reset();
     }
   }
   return ret;
@@ -2512,8 +2513,10 @@ int ObExternalSortV1<T, Compare>::do_sort(const bool final_merge)
     memory_stage_.add_memory_round(memory_round_);
     memory_stage_.wait_for_stop();
     memory_stage_.wait();
+    memory_stage_.destroy();
     writer_stage_.wait_for_stop();
     writer_stage_.wait();
+    writer_stage_.destroy();
     // memory_stage_.run1();
     // writer_stage_.run1();
   }

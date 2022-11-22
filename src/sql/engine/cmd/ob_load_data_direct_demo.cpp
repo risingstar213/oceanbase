@@ -1114,6 +1114,11 @@ int ObLoadFileReaderV1::read_next_buffer(ObLoadDataBufferV1 &buffer)
     ret = OB_FILE_NOT_OPENED;
     LOG_WARN("file not opened", KR(ret));
   } else if (is_read_ended_) {
+    if (NULL != buffer.data()) {
+      munmap(buffer.data(), buffer.get_capacity());
+      buffer.set_data(NULL);
+      buffer.set_capacity(0);
+    }
     ret = OB_ITER_END;
   } else {
     int64_t capacity = buffer.get_capacity();

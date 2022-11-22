@@ -115,8 +115,8 @@ public:
   int read_next_buffer_v2(ObLoadDataBufferV2 &buffer);
 private:
   int fd_;
-  int offset_;
-  int len_;
+  int64_t offset_;
+  int64_t len_;
   bool is_read_ended_;
 };
 
