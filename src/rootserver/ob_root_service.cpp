@@ -1084,8 +1084,7 @@ int ObRootService::start_service()
       FLOG_WARN("fail to set rs status", KR(ret));
     } else if (OB_FAIL(schedule_refresh_server_timer_task(0))) {
       FLOG_WARN("failed to schedule refresh_server task", KR(ret));
-    } else if (OB_FAIL(schedule_restart_timer_task(5L * 1000 * 1000))) {
-      // For test restart, 5s
+    } else if (OB_FAIL(schedule_restart_timer_task(0))) {
       FLOG_WARN("failed to schedule restart task", KR(ret));
     } else if (OB_FAIL(schema_service_->get_ddl_epoch_mgr().remove_all_ddl_epoch())) {
       FLOG_WARN("fail to remove ddl epoch", KR(ret));
@@ -4987,7 +4986,11 @@ int ObRootService::do_restart()
   // renew master rootservice, ignore error
   if (OB_SUCC(ret)) {
     int tmp_ret = rs_mgr_->renew_master_rootserver();
-    if (OB_SUCCESS != tmp_ret) {
+    if (OB_RS_NOT_MASTER == tmp_ret) {
+      // OB_RS_NOT_MASTER cannot be ignored !!!
+      ret = tmp_ret;
+      FLOG_WARN("renew master rootservice failed", KR(tmp_ret));
+    } else if (OB_SUCCESS != tmp_ret) {
       FLOG_WARN("renew master rootservice failed", KR(tmp_ret));
     }
   }
