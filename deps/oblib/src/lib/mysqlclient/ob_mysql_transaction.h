@@ -83,6 +83,10 @@ public:
     return do_stash_query(QUERY_MIN_BATCH_CNT);
   }
   constexpr static int QUERY_MIN_BATCH_CNT = 200;
+
+  int get_query_batch_size() {
+    return QUERY_MIN_BATCH_CNT;
+  }
   // do stash query all
   int do_stash_query(int min_batch_cnt = 1);
 protected:

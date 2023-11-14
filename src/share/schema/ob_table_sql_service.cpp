@@ -1083,7 +1083,7 @@ int ObTableSqlService::add_columns(ObISQLClient &sql_client,
     ret = add_columns_for_core(sql_client, table);
   } else {
     // ret = add_columns_for_not_core(sql_client, table);
-    ret = add_columns_batch(sql_client, table);
+    ret = add_columns_for_not_core_v2(sql_client, table);
   }
   return ret;
 }
@@ -1283,6 +1283,135 @@ int ObTableSqlService::add_columns_for_not_core(ObISQLClient &sql_client,
   return ret;
 }
 
+int ObTableSqlService::add_columns_for_not_core_v2(common::ObISQLClient &sql_client, const ObTableSchema &table)
+{
+  int ret = OB_SUCCESS;
+  const int64_t new_schema_version = table.get_schema_version();
+  const uint64_t tenant_id = table.get_tenant_id();
+  const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
+  if (OB_FAIL(check_ddl_allowed(table))) {
+    LOG_WARN("check ddl allowd failed", K(ret), K(table));
+  }
+  int64_t offset = 0;
+  int64_t column_size = table.get_column_count();
+  ObSqlString column_sql_obj;
+  ObSqlString column_history_sql_obj;
+  ObSqlString *column_sql_ptr = &column_sql_obj;
+  ObSqlString *column_history_sql_ptr = &column_history_sql_obj;
+
+  while (column_size > 0) {
+    column_sql_ptr = &column_sql_obj;
+    column_history_sql_ptr = &column_history_sql_obj;
+    // for batch sql query
+    bool enable_stash_query = false;
+    ObSqlTransQueryStashDesc *stash_desc;
+    ObSqlTransQueryStashDesc *stash_desc2;
+    ObMySQLTransaction* trans = dynamic_cast<ObMySQLTransaction*>(&sql_client);
+
+    if (OB_SUCC(ret) && trans != nullptr && trans->get_enable_query_stash()) {
+      if (OB_FAIL(trans->get_stash_query(tenant_id, OB_ALL_COLUMN_TNAME, stash_desc))) {
+        LOG_WARN("get_stash_query fail", K(ret), K(tenant_id));
+      } else if (OB_FAIL(trans->get_stash_query(tenant_id, OB_ALL_COLUMN_HISTORY_TNAME, stash_desc2))) {
+        LOG_WARN("get_stash_query fail", K(ret), K(tenant_id));
+      } else {
+        if ((stash_desc->get_stash_query().empty() && !stash_desc2->get_stash_query().empty()) ||
+          (!stash_desc->get_stash_query().empty() && stash_desc2->get_stash_query().empty()) ||
+          ((stash_desc->get_row_cnt() != stash_desc2->get_row_cnt()))) {
+          LOG_WARN("table stash scene is not match", K(stash_desc->get_row_cnt()), K(stash_desc2->get_row_cnt()));
+          if (OB_FAIL(trans->do_stash_query())) {
+            LOG_WARN("do_stash_query fail", K(ret));
+          } else if (OB_FAIL(trans->get_stash_query(tenant_id, OB_ALL_COLUMN_TNAME, stash_desc))) {
+            LOG_WARN("get_stash_query fail", K(ret), K(tenant_id));
+          } else if (OB_FAIL(trans->get_stash_query(tenant_id, OB_ALL_COLUMN_HISTORY_TNAME, stash_desc2))) {
+            LOG_WARN("get_stash_query fail", K(ret), K(tenant_id));
+          }
+        }
+        if (OB_SUCC(ret)) {
+          column_sql_ptr = &stash_desc->get_stash_query();
+          column_history_sql_ptr = &stash_desc2->get_stash_query();
+          enable_stash_query = true;
+        }
+      }
+    }
+    int64_t stash_room;
+    if (enable_stash_query) {
+      stash_room = trans->get_query_batch_size() - stash_desc->get_row_cnt();
+    } else {
+      stash_room = column_size;
+    }
+    int64_t stash_size = (column_size < stash_room) ? column_size : stash_room;
+
+    ObSqlString &column_sql = *column_sql_ptr;
+    ObSqlString &column_history_sql = *column_history_sql_ptr;
+
+    for (int64_t i = 0; (OB_SUCCESS == ret) && (i < stash_size); i++) {
+      ObColumnSchemaV2 column = *table.get_column_schema_by_idx(i + offset);
+      column.set_schema_version(new_schema_version);
+      column.set_tenant_id(table.get_tenant_id());
+      column.set_table_id(table.get_table_id());
+      ObDMLSqlSplicer dml;
+      if (OB_FAIL(gen_column_dml(exec_tenant_id, column, dml))) {
+        LOG_WARN("gen_column_dml failed", K(column), K(ret));
+      } else if (column_sql.empty()) {
+        if (OB_FAIL(dml.splice_insert_sql(OB_ALL_COLUMN_TNAME, column_sql))) {
+          LOG_WARN("splice_insert_sql failed", "table_name", OB_ALL_COLUMN_TNAME, K(ret));
+        } else {
+          const int64_t is_deleted = 0;
+          if (OB_FAIL(dml.add_column("is_deleted", is_deleted))) {
+            LOG_WARN("dml add column failed", K(ret));
+          } else if (OB_FAIL(dml.splice_insert_sql(
+                  OB_ALL_COLUMN_HISTORY_TNAME, column_history_sql))) {
+            LOG_WARN("splice_insert_sql failed", "table_name", OB_ALL_COLUMN_HISTORY_TNAME, K(ret));
+          }
+        }
+      } else {
+        ObSqlString value_str;
+        if (OB_FAIL(dml.splice_values(value_str))) {
+          LOG_WARN("splice_values failed", K(ret));
+        } else if (OB_FAIL(column_sql.append_fmt(", (%s)", value_str.ptr()))) {
+          LOG_WARN("append_fmt failed", K(value_str), K(ret));
+        } else {
+          value_str.reset();
+          const int64_t is_deleted = 0;
+          if (OB_FAIL(dml.add_column("is_deleted", is_deleted))) {
+            LOG_WARN("add column failed", K(ret));
+          } else if (OB_FAIL(dml.splice_values(value_str))) {
+            LOG_WARN("splice_values failed", K(ret));
+          } else if (OB_FAIL(column_history_sql.append_fmt(", (%s)", value_str.ptr()))) {
+            LOG_WARN("append_fmt failed", K(value_str), K(ret));
+          }
+        }
+      }
+    }
+
+    int64_t affected_rows = 0;
+    if (OB_FAIL(ret)) {
+    } else if (enable_stash_query) {
+      stash_desc->add_row_cnt(stash_size);
+      stash_desc2->add_row_cnt(stash_size);
+      if (OB_FAIL(trans->do_stash_query_batch())) {
+        LOG_WARN("do_stash_query fail", K(ret));
+      }
+    } else if (OB_FAIL(sql_client.write(exec_tenant_id, column_sql.ptr(), affected_rows))) {
+      LOG_WARN("execute sql failed", K(column_sql), K(ret));
+    } else if (affected_rows != stash_size) {
+      LOG_WARN("affected_rows not equal to column count", K(affected_rows),
+          "column_count", stash_size, K(ret));
+    } else if (OB_FAIL(sql_client.write(exec_tenant_id, column_history_sql.ptr(), affected_rows))) {
+      LOG_WARN("execute_sql failed", K(column_history_sql), K(ret));
+    } else if (affected_rows != stash_size) {
+      LOG_WARN("affected_rows not equal to column count", K(affected_rows),
+          "column_count", stash_size, K(ret));
+    }
+
+    offset      += stash_size;
+    column_size -= stash_size;
+
+  }
+
+  return ret;
+}
+
 int ObTableSqlService::add_columns_batch_one_trip(common::ObISQLClient &sql_client, const ObTableSchema &table, int64_t start, int64_t length)
 {
   int ret = OB_SUCCESS;
@@ -1296,35 +1425,7 @@ int ObTableSqlService::add_columns_batch_one_trip(common::ObISQLClient &sql_clie
   ObSqlString column_history_sql_obj;
   ObSqlString *column_sql_ptr = &column_sql_obj;
   ObSqlString *column_history_sql_ptr = &column_history_sql_obj;
-  // for batch sql query
-  bool enable_stash_query = false;
-  ObSqlTransQueryStashDesc *stash_desc;
-  ObSqlTransQueryStashDesc *stash_desc2;
-  ObMySQLTransaction* trans = dynamic_cast<ObMySQLTransaction*>(&sql_client);
-  if (OB_SUCC(ret) && trans != nullptr && trans->get_enable_query_stash()) {
-    if (OB_FAIL(trans->get_stash_query(tenant_id, OB_ALL_COLUMN_TNAME, stash_desc))) {
-      LOG_WARN("get_stash_query fail", K(ret), K(tenant_id));
-    } else if (OB_FAIL(trans->get_stash_query(tenant_id, OB_ALL_COLUMN_HISTORY_TNAME, stash_desc2))) {
-      LOG_WARN("get_stash_query fail", K(ret), K(tenant_id));
-    } else {
-      if ((stash_desc->get_stash_query().empty() && !stash_desc2->get_stash_query().empty()) ||
-        (!stash_desc->get_stash_query().empty() && stash_desc2->get_stash_query().empty())) {
-        LOG_WARN("table stash scene is not match", K(stash_desc->get_row_cnt()), K(stash_desc2->get_row_cnt()));
-        if (OB_FAIL(trans->do_stash_query())) {
-           LOG_WARN("do_stash_query fail", K(ret));
-        } else if (OB_FAIL(trans->get_stash_query(tenant_id, OB_ALL_COLUMN_TNAME, stash_desc))) {
-          LOG_WARN("get_stash_query fail", K(ret), K(tenant_id));
-        } else if (OB_FAIL(trans->get_stash_query(tenant_id, OB_ALL_COLUMN_HISTORY_TNAME, stash_desc2))) {
-          LOG_WARN("get_stash_query fail", K(ret), K(tenant_id));
-        }
-      }
-      if (OB_SUCC(ret)) {
-        column_sql_ptr = &stash_desc->get_stash_query();
-        column_history_sql_ptr = &stash_desc2->get_stash_query();
-        enable_stash_query = true;
-      }
-    }
-  }
+
   ObSqlString &column_sql = *column_sql_ptr;
   ObSqlString &column_history_sql = *column_history_sql_ptr;
   
@@ -1370,12 +1471,6 @@ int ObTableSqlService::add_columns_batch_one_trip(common::ObISQLClient &sql_clie
 
   int64_t affected_rows = 0;
   if (OB_FAIL(ret)) {
-  } else if (enable_stash_query) {
-    stash_desc->add_row_cnt(length);
-    stash_desc2->add_row_cnt(length);
-    if (OB_FAIL(trans->do_stash_query(int(length)))) {
-      LOG_WARN("do_stash_query fail", K(ret));
-    }
   } else if (OB_FAIL(sql_client.write(exec_tenant_id, column_sql.ptr(), affected_rows))) {
     LOG_WARN("execute sql failed", K(column_sql), K(ret));
   } else if (affected_rows != length) {

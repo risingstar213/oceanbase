@@ -290,6 +290,8 @@ private:
   int add_columns_for_core(common::ObISQLClient &sql_client, const ObTableSchema &table);
   int add_columns_for_not_core(common::ObISQLClient &sql_client, const ObTableSchema &table);
 
+  int add_columns_for_not_core_v2(common::ObISQLClient &sql_client, const ObTableSchema &table);
+
   int add_columns_batch_one_trip(common::ObISQLClient &sql_client, const ObTableSchema &table, int64_t start, int64_t length);
   int add_columns_batch(common::ObISQLClient &sql_client, const ObTableSchema &table);
 
