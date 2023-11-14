@@ -2529,6 +2529,12 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
     }
   }
 
+  if (result.get_is_from_plan_cache()) {
+    LOG_INFO("get plan from plan cache");
+  } else {
+    LOG_INFO("cannot get plan from plan cache");
+  }
+
   int tmp_ret = ret;
   if (!is_begin_commit_stmt
       && 0 == context.multi_stmt_item_.get_seq_num() /* only first item of a multi stmt, or single stmt */
@@ -3790,6 +3796,7 @@ int ObSql::pc_get_plan_and_fill_result(ObPlanCacheCtx &pc_ctx,
     LOG_DEBUG("fail to get plan", K(ret));
   } else if (OB_SUCCESS != get_plan_err) {
     //get plan from plan cache failed
+    LOG_INFO("cannot get plan from plan cache", K(get_plan_err));
   } else if ( FALSE_IT(plan = static_cast<ObPhysicalPlan*>(guard.get_cache_obj()))) {
     // do nothing
   } else if (OB_ISNULL(plan)) {

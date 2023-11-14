@@ -1549,6 +1549,112 @@ int ObDDLOperator::create_table(ObTableSchema &table_schema,
   return ret;
 }
 
+int ObDDLOperator::create_tables(common::ObIArray<share::schema::ObTableSchema> &tables,
+                    common::ObMySQLTransaction &trans)
+{
+  int ret = OB_SUCCESS;
+  const int64_t tenant_id = tables.at(0).get_tenant_id();
+  int64_t new_schema_version = OB_INVALID_VERSION;
+  ObSchemaService *schema_service = schema_service_.get_schema_service();
+  ObSchemaGetterGuard schema_guard;
+
+  if (OB_ISNULL(schema_service)) {
+    ret = OB_ERR_SYS;
+    RS_LOG(ERROR, "schema_service must not null");
+  } else if (OB_FAIL(schema_service_.get_tenant_schema_guard(tenant_id, schema_guard))) {
+    LOG_WARN("failed to get schema guard", K(ret));
+  } else if (OB_FAIL(schema_service_.gen_new_schema_version(tenant_id, new_schema_version))) {
+    LOG_WARN("fail to gen new schema_version", K(ret), K(tenant_id));
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); i++) {
+      ObTableSchema &table_schema = tables.at(i);
+      const int64_t table_id = table_schema.get_table_id();
+      const ObString &table_name = table_schema.get_table_name();
+      bool need_sync_schema_version = 
+        !(ObSysTableChecker::is_sys_table_index_tid(table_id) ||
+        is_sys_lob_table(table_id));
+
+      table_schema.set_schema_version(new_schema_version);
+
+      if (OB_FAIL(schema_service->get_table_sql_service().create_table(
+        table_schema,
+        trans,
+        NULL,
+        need_sync_schema_version,
+        false
+      ))) {
+        RS_LOG(WARN, "failed to create table", K(ret));
+      }
+    }
+
+    for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); i++) {
+      ObTableSchema &table_schema = tables.at(i);
+      if (OB_FAIL(sync_version_for_cascade_table(tenant_id,
+               table_schema.get_depend_table_ids(), trans))) {
+        RS_LOG(WARN, "fail to sync cascade depend table", K(ret));
+      } else if (OB_FAIL(sync_version_for_cascade_mock_fk_parent_table(table_schema.get_tenant_id(), table_schema.get_depend_mock_fk_parent_table_ids(), trans))) {
+        LOG_WARN("fail to sync cascade depend_mock_fk_parent_table_ids table", K(ret));
+      }
+    }
+  }
+
+  // add audit in tables if neccesary
+  for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); i++) {
+    ObTableSchema &table_schema = tables.at(i);
+    if (!OB_SUCC(ret) || !(table_schema.is_user_table() || table_schema.is_external_table())) {
+      continue;
+    }
+    const uint64_t tenant_id = table_schema.get_tenant_id();
+    ObArray<const ObSAuditSchema *> audits;
+
+    ObSchemaService *schema_service_impl = schema_service_.get_schema_service();
+    if (OB_FAIL(schema_guard.get_audit_schema_in_owner(tenant_id,
+                                                              AUDIT_OBJ_DEFAULT,
+                                                              OB_AUDIT_MOCK_USER_ID,
+                                                              audits))) {
+      LOG_WARN("get get_audit_schema_in_owner failed", K(tenant_id), K(table_schema), K(ret));
+    } else if (!audits.empty()) {
+      common::ObSqlString public_sql_string;
+      ObSAuditSchema new_audit_schema;
+      for (int64_t i = 0; OB_SUCC(ret) && i < audits.count(); ++i) {
+        uint64_t new_audit_id = common::OB_INVALID_ID;
+        const ObSAuditSchema *audit_schema = audits.at(i);
+        if (OB_ISNULL(audit_schema)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("audit_schema is NULL", K(ret));
+        } else if (!audit_schema->is_access_operation_for_table()) {
+          continue;
+        } else if (OB_FAIL(schema_service_.gen_new_schema_version(tenant_id, new_schema_version))) {
+          LOG_WARN("fail to gen new schema_version", K(ret), K(tenant_id));
+        } else if (OB_FAIL(schema_service_impl->fetch_new_audit_id(tenant_id, new_audit_id))) {
+          LOG_WARN("Failed to fetch new_audit_id", K(ret));
+        } else if (OB_FAIL(new_audit_schema.assign(*audit_schema))) {
+          LOG_WARN("fail to assign audit schema", KR(ret));
+        } else {
+          new_audit_schema.set_schema_version(new_schema_version);
+          new_audit_schema.set_audit_id(new_audit_id);
+          new_audit_schema.set_audit_type(AUDIT_TABLE);
+          new_audit_schema.set_owner_id(table_schema.get_table_id());
+          if (OB_FAIL(schema_service_impl->get_audit_sql_service().handle_audit_metainfo(
+              new_audit_schema,
+              AUDIT_MT_ADD,
+              false,
+              new_schema_version,
+              NULL,
+              trans,
+              public_sql_string))) {
+            LOG_WARN("drop audit_schema failed",  K(new_audit_schema), K(ret));
+          } else {
+            LOG_INFO("succ to add audit_schema from default", K(new_audit_schema));
+          }
+        }
+      }
+    }
+  }
+
+  return ret;
+}
+
 int ObDDLOperator::sync_version_for_cascade_table(
     const uint64_t tenant_id,
     const ObIArray<uint64_t> &table_ids,
