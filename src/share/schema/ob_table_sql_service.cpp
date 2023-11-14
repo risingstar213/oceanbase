@@ -1134,7 +1134,7 @@ int ObTableSqlService::add_columns_for_core(ObISQLClient &sql_client, const ObTa
       if (OB_FAIL(dml.add_column("is_deleted", is_deleted))) {
         LOG_WARN("add column failed", K(ret));
       } else if (stash_desc->get_stash_query().empty()) {
-        if (OB_FAIL(dml.splice_insert_sql_without_plancache(OB_ALL_COLUMN_HISTORY_TNAME, stash_desc->get_stash_query()))) {
+        if (OB_FAIL(dml.splice_insert_sql(OB_ALL_COLUMN_HISTORY_TNAME, stash_desc->get_stash_query()))) {
           LOG_WARN("dml splice_insert_sql fail", K(ret));
         }
       } else {

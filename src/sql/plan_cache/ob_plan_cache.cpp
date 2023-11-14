@@ -1027,8 +1027,6 @@ int ObPlanCache::check_can_do_insert_opt(common::ObIAllocator &allocator,
 //3.添加plan stat
 int ObPlanCache::add_plan(ObPhysicalPlan *plan, ObPlanCacheCtx &pc_ctx)
 {
-  LOG_INFO("ObPlanCache try to add plan");
-  LOG_INFO("plan size", K(plan->get_mem_size()), K(get_mem_high()));
   int ret = OB_SUCCESS;
   FLTSpanGuard(pc_add_plan);
   ObGlobalReqTimeService::check_req_timeinfo();
