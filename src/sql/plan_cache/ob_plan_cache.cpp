@@ -1075,11 +1075,11 @@ int ObPlanCache::add_plan_cache(ObILibCacheCtx &ctx,
           SQL_PC_LOG(WARN, "fail to remove lib cache node", K(ret));
         }
       }
-      if (OB_SUCCESS == ret) {
-        LOG_INFO("success to add plan cache");
-      } else {
-        LOG_INFO("fail to add plan cache", K(ret));
-      }
+      // if (OB_SUCCESS == ret) {
+      //   LOG_INFO("success to add plan cache");
+      // } else {
+      //   LOG_INFO("fail to add plan cache", K(ret));
+      // }
     } while (OB_OLD_SCHEMA_VERSION == ret && pc_ctx.need_retry_add_plan());
   }
   return ret;
