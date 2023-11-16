@@ -17,6 +17,8 @@
 #include "lib/mysqlclient/ob_mysql_proxy.h"
 #include "lib/mysqlclient/ob_mysql_transaction.h"
 
+#include "lib/thread/threads.h"
+
 namespace oceanbase
 {
 namespace common
@@ -46,6 +48,14 @@ ObMySQLTransaction::~ObMySQLTransaction()
       ob_delete(it.second);
     }
     query_stash_desc_.destroy();
+  }
+
+  if (enable_async_) {
+    OB_DELETE(ObAsyncSqlWorker,  SET_USE_500("PThread"), async_worker_);
+    async_worker_ = NULL;
+    delete async_trans_;
+    async_trans_ = NULL;
+    enable_async_ = false;
   }
 }
 
@@ -116,6 +126,10 @@ int ObMySQLTransaction::end_transaction(const bool commit)
 
 int ObMySQLTransaction::do_stash_query(int min_batch_cnt)
 {
+  if (enable_async_) {
+    return do_stash_query_async(min_batch_cnt);
+  }
+  
   int ret = OB_SUCCESS;
   int64_t affected_rows = 0;
   for (hash::ObHashMap<const char*, ObSqlTransQueryStashDesc*>::iterator it = query_stash_desc_.begin();
@@ -139,6 +153,92 @@ int ObMySQLTransaction::do_stash_query(int min_batch_cnt)
     }
   }
   return ret;
+}
+
+int ObMySQLTransaction::do_stash_query_async(int min_batch_cnt)
+{
+  int ret = OB_SUCCESS;
+  for (hash::ObHashMap<const char*, ObSqlTransQueryStashDesc*>::iterator it = query_stash_desc_.begin();
+      OB_SUCC(ret) && it != query_stash_desc_.end(); it++) {
+    if (it->second->get_row_cnt() < min_batch_cnt) {
+      continue;
+    }
+    if (it->second->get_tenant_id() == OB_INVALID_TENANT_ID) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_ERROR("do_stash_query_async", K(ret));
+    } else if (OB_FAIL(async_worker_->push_back_work(it->second))) {
+      LOG_ERROR("push back async work", K(ret));
+    } else {
+      it->second->reset();
+      LOG_INFO("query_write async succ", "table", it->first);
+    }
+  }
+  return ret;
+}
+
+int ObMySQLTransaction::enable_async(ObISQLClient *sql_client, const uint64_t tenant_id)
+{
+  int ret = OB_SUCCESS;
+  if (enable_async_) {
+    return ret;
+  }
+  enable_async_ = true;
+
+  async_trans_ = new ObMySQLTransaction();
+  if (OB_FAIL(async_trans_->start(sql_client, tenant_id, false))) {
+    LOG_WARN("fail to start async trans", KR(ret), K(tenant_id));
+  }
+
+  // Temporarily set expect_run_wrapper to NULL for creating normal thread
+  oceanbase::lib::IRunWrapper *expect_run_wrapper =  oceanbase::lib::Threads::get_expect_run_wrapper();
+  oceanbase::lib::Threads::get_expect_run_wrapper() = NULL;
+  DEFER( oceanbase::lib::Threads::get_expect_run_wrapper() = expect_run_wrapper);
+
+  async_worker_ = OB_NEW(ObAsyncSqlWorker,  SET_USE_500("PThread"));
+  async_worker_->set_thread_count(1);
+  async_worker_->init(async_trans_);
+
+  if(OB_FAIL(async_worker_->start())) {
+    STORAGE_LOG(WARN, "fail to start memory async worker", K(ret));
+  } else {
+    LOG_INFO("success to start async worker");
+  }
+
+  return ret;
+}
+
+int ObMySQLTransaction::wait_for_aync_done()
+{
+  int ret = OB_SUCCESS;
+  if (!enable_async_) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("this transaction doesn't enable aync");
+    return ret;
+  }
+  if (NULL == async_worker_) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("this transaction aync worker is null");
+    return ret;
+  }
+
+  async_worker_->wait_for_all_over();
+  if (async_worker_->get_errors()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("aync worker get error");
+    return ret;
+  }
+
+  return ret;
+}
+
+bool ObMySQLTransaction::is_async()
+{
+  return enable_async_;
+}
+
+ObMySQLTransaction* ObMySQLTransaction::get_async_trans()
+{
+  return async_trans_;
 }
 
 int ObMySQLTransaction::get_stash_query(uint64_t tenant_id, const char *table_name, ObSqlTransQueryStashDesc *&desc)
@@ -185,6 +285,18 @@ int ObMySQLTransaction::end(const bool want_commit)
         commit = false;
       }
     }
+    if (enable_async_ && commit) {
+      int tmp_ret = wait_for_aync_done();
+      if (tmp_ret != OB_SUCCESS) {
+        LOG_WARN("do_stash_query fail", K(tmp_ret));
+        commit = false;
+      }
+      async_worker_->stop_worker();
+      if (OB_FAIL(async_trans_->end(commit))) {
+        LOG_WARN("coomit async work fail", K(tmp_ret));
+        commit = false;
+      }
+    }
     ret = end_transaction(commit);
     if (OB_FAIL(ret)) {
       LOG_WARN("fail to end transation", K(ret));
@@ -195,6 +307,105 @@ int ObMySQLTransaction::end(const bool want_commit)
   }
   close();
   return ret;
+}
+
+void ObAsyncSqlWorker::run1()
+{
+  // init the environment
+  // common::ObTenantStatEstGuard stat_est_quard(MTL_ID());
+  // share::ObTenantBase *tenant_base = MTL_CTX();
+  // lib::Worker::CompatMode mode = ((omt::ObTenant *)tenant_base)->get_compat_mode();
+  // lib::Worker::set_compatibility_mode(mode);
+  // do work
+  int64_t affected_rows = 0;
+  while (true) {
+    cond_.lock();
+
+    while(work_queue_.empty() && !has_stopped_) {
+      cond_.wait();
+    }
+
+    if (has_stopped_) {
+      cond_.unlock();
+      break;
+    }
+
+    ObSqlTransQueryStashDesc *desc = work_queue_.front();
+    cond_.unlock();
+
+    LOG_INFO("ObAsyncSqlWorker start one trip");
+    const uint64_t start_time = ObTimeUtility::current_time();
+
+    int ret = trans_->write(desc->get_tenant_id(), desc->get_stash_query().ptr(), affected_rows);
+    if (OB_SUCCESS != ret) {
+      LOG_ERROR("query_write", "tenant_id", desc->get_tenant_id(), "query", desc->get_stash_query(), K(ret));
+      has_errors_ = true;
+    } else if (affected_rows != desc->get_row_cnt()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_ERROR("query_write", K(ret), K(affected_rows), "row_cnt", desc->get_row_cnt(), "query", desc->get_stash_query());
+    } else {
+      const uint64_t end_time = ObTimeUtility::current_time();
+      LOG_INFO("query_write_async succ", "rows", affected_rows, "cost", end_time - start_time);
+    }
+
+    cond_.lock();
+    work_queue_.pop();
+    cond_.unlock();
+
+    delete desc;
+
+  }
+}
+
+int ObAsyncSqlWorker::push_back_work(ObSqlTransQueryStashDesc *desc)
+{
+  ObSqlTransQueryStashDesc *desc_copy = new ObSqlTransQueryStashDesc();
+  desc_copy->set_tenant_id(desc->get_tenant_id());
+  desc_copy->add_row_cnt(desc->get_row_cnt());
+  desc_copy->get_stash_query().append(desc->get_stash_query().ptr());
+
+  LOG_INFO("push_back_work", "row",  desc_copy->get_row_cnt());
+  
+  cond_.lock();
+  work_queue_.push(desc_copy);
+  cond_.unlock();
+
+  cond_.signal();
+
+  return OB_SUCCESS;
+}
+
+void ObAsyncSqlWorker::wait_for_all_over()
+{
+  const uint64_t start_time = ObTimeUtility::current_time();
+  while (true) {
+    if (work_queue_.empty()) {
+      break;
+    }
+  }
+  const uint64_t end_time = ObTimeUtility::current_time();
+
+  LOG_INFO("async worker is done !!!", "cost", end_time - start_time);
+}
+void ObAsyncSqlWorker::stop_worker()
+{
+  stop();
+  has_stopped_ = true;
+
+  cond_.broadcast();
+
+  wait();
+}
+
+void ObAsyncSqlWorker::init(ObMySQLTransaction *trans)
+{
+  trans_ = trans;
+  cond_.init(ObWaitEventIds::DEFAULT_COND_WAIT);
+}
+
+bool ObAsyncSqlWorker::get_errors()
+{
+  return has_errors_;
 }
 
 } // end namespace commmon

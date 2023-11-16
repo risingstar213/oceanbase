@@ -19,6 +19,14 @@
 #include "lib/mysqlclient/ob_mysql_connection.h"
 #include "lib/mysqlclient/ob_single_connection_proxy.h"
 
+#include "lib/stat/ob_session_stat.h"
+#include "lib/worker.h"
+#include "lib/lock/ob_thread_cond.h"
+#include "share/ob_thread_pool.h"
+#include "observer/omt/ob_tenant.h"
+
+#include <queue>
+
 namespace oceanbase
 {
 namespace common
@@ -52,10 +60,33 @@ private:
   ObSqlString stash_query_;
 };
 
+class ObMySQLTransaction;
+
+// Async sql worker
+class ObAsyncSqlWorker : public share::ObThreadPool
+{
+public:
+  void run1() override;
+  int push_back_work(ObSqlTransQueryStashDesc *desc);
+  void wait_for_all_over();
+  void stop_worker();
+  void init(ObMySQLTransaction *trans);
+
+  bool get_errors();
+
+private:
+  common::ObThreadCond cond_;
+  std::queue<ObSqlTransQueryStashDesc *> work_queue_;
+  bool has_stopped_ = false;
+  bool has_errors_ = false;
+  ObMySQLTransaction *trans_;
+};
+
 // not thread safe sql transaction execution
 // use one connection
 class ObMySQLTransaction : public ObSingleConnectionProxy
 {
+  friend class ObAsyncSqlWorker;
 public:
   ObMySQLTransaction(bool enable_query_stash = false);
   virtual ~ObMySQLTransaction();
@@ -89,6 +120,14 @@ public:
   }
   // do stash query all
   int do_stash_query(int min_batch_cnt = 1);
+  int do_stash_query_async(int min_batch_cnt = 1);
+  int enable_async(ObISQLClient *sql_client, const uint64_t tenant_id);
+  int wait_for_aync_done();
+
+  ObMySQLTransaction* get_async_trans();
+  bool is_async();
+
+  
 protected:
   int start_transaction(const uint64_t &tenant_id, bool with_snap_shot);
   int end_transaction(const bool commit);
@@ -98,6 +137,11 @@ protected:
   // inner sql now not support multi query，enable_query_stash now just enable for batch insert values
   bool enable_query_stash_;
   hash::ObHashMap<const char*, ObSqlTransQueryStashDesc*> query_stash_desc_;
+  
+  ObAsyncSqlWorker* async_worker_;
+
+  ObMySQLTransaction* async_trans_;
+  bool enable_async_ = false;
 };
 
 } // end namespace commmon

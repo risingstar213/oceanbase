@@ -27,7 +27,7 @@ namespace palf
 namespace election
 {
 
-int64_t MAX_TST = 100_ms;
+int64_t MAX_TST = 1_s;
 int64_t INIT_TS = -1;
 ObOccamTimer GLOBAL_REPORT_TIMER;
 
@@ -79,6 +79,11 @@ ElectionImpl::~ElectionImpl()
   is_inited_ = false;
   LOG_DESTROY(INFO, "election destroyed");
   #undef PRINT_WRAPPER
+}
+
+void ElectionImpl::set_max_tst(int64_t tst)
+{
+  MAX_TST = tst;
 }
 
 int ElectionImpl::init_and_start(const int64_t id,

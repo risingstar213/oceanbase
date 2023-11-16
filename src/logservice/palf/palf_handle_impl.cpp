@@ -2823,6 +2823,25 @@ int PalfHandleImpl::do_init_mem_(
   int ret = OB_SUCCESS;
   int pret = -1;
   const bool is_normal_replica = (log_meta.get_log_replica_property_meta().replica_type_ == NORMAL_REPLICA);
+  // get member number
+  {
+    bool only_one_member = false;
+    common::ObMemberList member_list;
+    int64_t relica_num;
+    GlobalLearnerList all_learners;
+    ObArray<ObAddr> addr_list;
+    log_meta.get_log_config_meta().curr_.convert_to_complete_config(member_list, relica_num, all_learners);
+    member_list.get_addr_array(addr_list);
+    only_one_member = (addr_list.size() == 0);
+    LOG_INFO("size: ", K(addr_list.size()));
+    if (only_one_member) {
+      election_.set_max_tst(100_ms);
+      LOG_INFO("set 100ms");
+    } else {
+      election_.set_max_tst(1_s);
+      LOG_INFO("set 1s");
+    }
+  }
   // inner priority seed: smaller means higher priority
   // reserve some bits for future requirements
   uint64_t election_inner_priority_seed = is_normal_replica ?

@@ -57,6 +57,7 @@ class ElectionImpl : public Election
 public:
   ElectionImpl();
   ~ElectionImpl();
+  void set_max_tst(int64_t tst);
   int init_and_start(const int64_t id,
                      common::ObOccamTimer *election_timer,
                      ElectionMsgSender *msg_handler,

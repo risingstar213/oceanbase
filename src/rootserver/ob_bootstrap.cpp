@@ -1015,6 +1015,8 @@ int ObBootstrap::batch_create_schema(ObDDLService &ddl_service,
                             OB_SYS_TENANT_ID,
                             refreshed_schema_version))) {
       LOG_WARN("start transaction failed", KR(ret));
+    } else if (OB_FAIL(trans.enable_async(&ddl_service.get_sql_proxy(), OB_SYS_TENANT_ID))) {
+      LOG_WARN("cannot enable async", KR(ret));
     } else {
       bool is_truncate_table = false;
       for (int64_t i = begin; OB_SUCC(ret) && i < end; ++i) {
