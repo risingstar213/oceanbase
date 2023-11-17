@@ -79,6 +79,8 @@ private:
   std::queue<ObSqlTransQueryStashDesc *> work_queue_;
   bool has_stopped_ = false;
   bool has_errors_ = false;
+
+  volatile int work_num = 0;
   ObMySQLTransaction *trans_;
 };
 

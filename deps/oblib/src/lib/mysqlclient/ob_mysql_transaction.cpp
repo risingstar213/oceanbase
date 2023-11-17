@@ -51,6 +51,7 @@ ObMySQLTransaction::~ObMySQLTransaction()
   }
 
   if (enable_async_) {
+    async_worker_->destroy();
     OB_DELETE(ObAsyncSqlWorker,  SET_USE_500("PThread"), async_worker_);
     async_worker_ = NULL;
     delete async_trans_;
@@ -346,10 +347,13 @@ void ObAsyncSqlWorker::run1()
     } else {
       const uint64_t end_time = ObTimeUtility::current_time();
       LOG_INFO("query_write_async succ", "rows", affected_rows, "cost", end_time - start_time);
+      int num = work_queue_.size();
+      LOG_INFO("query_write_async", "rest num", num);
     }
 
     cond_.lock();
     work_queue_.pop();
+    work_num -= 1;
     cond_.unlock();
 
     delete desc;
@@ -368,6 +372,7 @@ int ObAsyncSqlWorker::push_back_work(ObSqlTransQueryStashDesc *desc)
   
   cond_.lock();
   work_queue_.push(desc_copy);
+  work_num += 1;
   cond_.unlock();
 
   cond_.signal();
@@ -379,7 +384,7 @@ void ObAsyncSqlWorker::wait_for_all_over()
 {
   const uint64_t start_time = ObTimeUtility::current_time();
   while (true) {
-    if (work_queue_.empty()) {
+    if (work_num == 0) {
       break;
     }
   }
