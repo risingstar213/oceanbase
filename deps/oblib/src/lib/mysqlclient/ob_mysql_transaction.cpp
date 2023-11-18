@@ -197,7 +197,7 @@ int ObMySQLTransaction::enable_async(ObISQLClient *sql_client, const uint64_t te
 
   async_worker_ = OB_NEW(ObAsyncSqlWorker,  SET_USE_500("PThread"));
   async_worker_->set_thread_count(1);
-  async_worker_->init(async_trans_);
+  async_worker_->init(async_trans_, ObCurTraceId::get_trace_id());
 
   if(OB_FAIL(async_worker_->start())) {
     STORAGE_LOG(WARN, "fail to start memory async worker", K(ret));
@@ -319,6 +319,9 @@ void ObAsyncSqlWorker::run1()
   // lib::Worker::set_compatibility_mode(mode);
   // do work
   int64_t affected_rows = 0;
+  if (trace_id_ != NULL) {
+    ObCurTraceId::set(*trace_id_);
+  }
   while (true) {
     cond_.lock();
 
@@ -400,10 +403,11 @@ void ObAsyncSqlWorker::stop_worker()
   wait();
 }
 
-void ObAsyncSqlWorker::init(ObMySQLTransaction *trans)
+void ObAsyncSqlWorker::init(ObMySQLTransaction *trans, ObCurTraceId::TraceId *trace_id)
 {
   trans_ = trans;
   cond_.init(ObWaitEventIds::DEFAULT_COND_WAIT);
+  trace_id_ = trace_id;
 }
 
 bool ObAsyncSqlWorker::get_errors()

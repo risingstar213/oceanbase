@@ -2590,8 +2590,6 @@ int ObTableSqlService::create_table(ObTableSchema &table,
   int64_t cost_usec = 0;
   const uint64_t tenant_id = table.get_tenant_id();
 
-  LOG_INFO("ObTableSqlService::create_table");
-
   if (!table.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid create table argument, ", K(table));

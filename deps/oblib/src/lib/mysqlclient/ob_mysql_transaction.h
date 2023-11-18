@@ -70,7 +70,7 @@ public:
   int push_back_work(ObSqlTransQueryStashDesc *desc);
   void wait_for_all_over();
   void stop_worker();
-  void init(ObMySQLTransaction *trans);
+  void init(ObMySQLTransaction *trans, ObCurTraceId::TraceId *trace_id);
 
   bool get_errors();
 
@@ -81,7 +81,9 @@ private:
   bool has_errors_ = false;
 
   volatile int work_num = 0;
-  ObMySQLTransaction *trans_;
+  ObMySQLTransaction *trans_ = NULL;
+
+  ObCurTraceId::TraceId *trace_id_ = NULL;
 };
 
 // not thread safe sql transaction execution
@@ -140,9 +142,9 @@ protected:
   bool enable_query_stash_;
   hash::ObHashMap<const char*, ObSqlTransQueryStashDesc*> query_stash_desc_;
   
-  ObAsyncSqlWorker* async_worker_;
+  ObAsyncSqlWorker* async_worker_ = NULL;
 
-  ObMySQLTransaction* async_trans_;
+  ObMySQLTransaction* async_trans_ = NULL;
   bool enable_async_ = false;
 };
 

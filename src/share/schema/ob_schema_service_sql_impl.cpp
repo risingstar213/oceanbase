@@ -1547,20 +1547,20 @@ int ObSchemaServiceSQLImpl::fetch_all_column_info(
     if (OB_SUCC(ret)) {
       const bool check_deleted = (INT64_MAX != schema_version);
 
-      ObMySQLTransaction *trans = dynamic_cast<ObMySQLTransaction *>(&sql_client);
-      if (trans != NULL && trans->is_async()) {
-        trans->wait_for_aync_done();
-        DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(*trans->get_async_trans(), snapshot_timestamp);
-        if (OB_FAIL(sql_client_retry_weak.read(res, exec_tenant_id, sql.ptr()))) {
-          LOG_WARN("execute sql failed", KR(ret), K(tenant_id), K(sql));
-        } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("fail to get result. ", KR(ret), K(tenant_id), K(sql));
-        } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_column_schema(
-                          tenant_id, check_deleted, *result, table_schema_array))) {
-          LOG_WARN("failed to retrieve all column schema", KR(ret), K(tenant_id));
-        }
-      } else {
+      // ObMySQLTransaction *trans = dynamic_cast<ObMySQLTransaction *>(&sql_client);
+      // if (trans != NULL && trans->is_async()) {
+      //   trans->wait_for_aync_done();
+      //   DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(*trans->get_async_trans(), snapshot_timestamp);
+      //   if (OB_FAIL(sql_client_retry_weak.read(res, exec_tenant_id, sql.ptr()))) {
+      //     LOG_WARN("execute sql failed", KR(ret), K(tenant_id), K(sql));
+      //   } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
+      //     ret = OB_ERR_UNEXPECTED;
+      //     LOG_WARN("fail to get result. ", KR(ret), K(tenant_id), K(sql));
+      //   } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_column_schema(
+      //                     tenant_id, check_deleted, *result, table_schema_array))) {
+      //     LOG_WARN("failed to retrieve all column schema", KR(ret), K(tenant_id));
+      //   }
+      // } else {
         DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(sql_client, snapshot_timestamp);
         if (OB_FAIL(sql_client_retry_weak.read(res, exec_tenant_id, sql.ptr()))) {
           LOG_WARN("execute sql failed", KR(ret), K(tenant_id), K(sql));
@@ -1571,7 +1571,7 @@ int ObSchemaServiceSQLImpl::fetch_all_column_info(
                           tenant_id, check_deleted, *result, table_schema_array))) {
           LOG_WARN("failed to retrieve all column schema", KR(ret), K(tenant_id));
         }
-      }
+      // }
     }
   }
   return ret;
