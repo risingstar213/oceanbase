@@ -4129,13 +4129,11 @@ int ObMultiVersionSchemaService::set_last_refreshed_schema_info(const ObRefreshS
   return ret;
 }
 
-static common::SpinRWLock lock_for_schema_version;
 
 int ObMultiVersionSchemaService::gen_new_schema_version(
     uint64_t tenant_id,
     int64_t &schema_version)
 {
-  SpinWLockGuard guard(lock_for_schema_version);
   int ret = OB_SUCCESS;
   int64_t refreshed_schema_version = OB_INVALID_VERSION;
   schema_version = OB_INVALID_VERSION;

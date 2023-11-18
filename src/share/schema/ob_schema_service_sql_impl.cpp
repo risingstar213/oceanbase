@@ -441,11 +441,14 @@ bool ObSchemaServiceSQLImpl::in_parallel_ddl_thread_()
   return 0 == STRCASECMP(PARALLEL_DDL_THREAD_NAME, ob_get_origin_thread_name());
 }
 
+
+static common::SpinRWLock lock_for_schema_version;
 int ObSchemaServiceSQLImpl::gen_new_schema_version(
     const uint64_t tenant_id,
     const int64_t refreshed_schema_version,
     int64_t &schema_version)
 {
+  SpinWLockGuard guard(lock_for_schema_version);
   int ret = OB_SUCCESS;
   schema_version = OB_INVALID_VERSION;
   const int64_t version_cnt = 1;

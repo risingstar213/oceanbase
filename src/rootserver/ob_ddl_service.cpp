@@ -119,7 +119,7 @@
 
 #include <vector>
 #include <thread>
-#include <set>
+#include <unordered_set>
 
 namespace oceanbase
 {
@@ -23261,8 +23261,8 @@ int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTable
     int64_t refreshed_schema_version = 0;
     if (OB_FAIL(trans.start(sql_proxy_, tenant_id, refreshed_schema_version))) {
       LOG_WARN("start transaction failed", KR(ret));
-    // } else if (OB_FAIL(trans.enable_async(sql_proxy_, tenant_id))) {
-    //   LOG_WARN("enable async failed", KR(ret));
+    } else if (OB_FAIL(trans.enable_async(sql_proxy_, tenant_id))) {
+      LOG_WARN("enable async failed", KR(ret));
     } else {
       for (int64_t idx = begin;idx < end && OB_SUCC(ret); idx++) {
         ObTableSchema &table = *table_schemas.at(idx);
@@ -23354,7 +23354,7 @@ void ob_pthread_join(void *ptr);
 // 如果没有相关性，可以直接以 batch 为单位并行
 int ObDDLService::parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas)
 {
-  const int THREAD_NUM = 8;
+  const int THREAD_NUM = 4;
   
   int ret = OB_SUCCESS;
   int64_t begin = 0;
@@ -23415,6 +23415,8 @@ int ObDDLService::parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSc
               ret = OB_SUCCESS;
               LOG_INFO("schema error while create table, need retry", KR(ret), K(retry_times));
               usleep(1 * 1000 * 1000L); // 1s
+            } else {
+              break;
             }
           } else {
             ATOMIC_AAF(&finish_cnt, i + 1 - begin);
@@ -23447,10 +23449,11 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   ObSArray<ObTableSchema*> next_round_tables;
 
   ObIArray<ObTableSchema> &refer_tables = table_schemas;
-  std::set<uint64_t> table_ids;
+  std::unordered_set<uint64_t> table_ids;
 
   bool flag = true;
 
+  std::unordered_set<uint64_t> tmp_ids;
   for (int i = 0; i < table_schemas.count(); i++) {
     ObTableSchema &table = table_schemas.at(i);
     bool has_dep = 
@@ -23461,10 +23464,11 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
       flag = false;
       next_round_tables.push_back(&table);
     } else {
-      table_ids.insert(table.get_table_id());
+      tmp_ids.insert(table.get_table_id());
       this_round_tables.push_back(&table);
     }
   }
+  table_ids.insert(tmp_ids.begin(), tmp_ids.end());
 
   if (OB_FAIL(parallel_create_schemas(tenant_id, this_round_tables))) {
     LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
@@ -23474,6 +23478,7 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   while (!flag) {
     flag = true;
     ObSArray<ObTableSchema*> tmp_tables;
+    std::unordered_set<uint64_t> tmp_ids;
     this_round_tables.reset(); this_round_tables.reuse();
     for (int i = 0; i < next_round_tables.count(); i++) {
       ObTableSchema &table = *next_round_tables.at(i);
@@ -23485,10 +23490,11 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
         flag = false;
         tmp_tables.push_back(&table);
       } else {
-        table_ids.insert(table.get_table_id());
+        tmp_ids.insert(table.get_table_id());
         this_round_tables.push_back(&table);
       }
     }
+    table_ids.insert(tmp_ids.begin(), tmp_ids.end());
 
     if (OB_FAIL(parallel_create_schemas(tenant_id, this_round_tables))) {
       LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
