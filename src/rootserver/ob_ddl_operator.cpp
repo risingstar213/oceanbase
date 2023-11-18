@@ -1481,6 +1481,7 @@ int ObDDLOperator::create_table(ObTableSchema &table_schema,
   } else if (OB_FAIL(schema_service_.gen_new_schema_version(tenant_id, new_schema_version))) {
     LOG_WARN("fail to gen new schema_version", K(ret), K(tenant_id));
   } else {
+    LOG_INFO("set_schema_version");
     table_schema.set_schema_version(new_schema_version);
     if (OB_FAIL(schema_service->get_table_sql_service().create_table(
         table_schema,

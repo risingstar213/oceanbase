@@ -1973,6 +1973,9 @@ public:
       const SCHEMA &schema,
       share::schema::ObSchemaGetterGuard &schema_guard,
       common::ObIArray<common::ObRegion> &primary_regions);
+
+  int batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, const int64_t begin, const int64_t end);
+  int parallel_create_schemas_check_correlartion(uint64_t tenant_id, ObIArray<ObTableSchema> &table_schemas);
 public:
   int ddl_rlock();
   int ddl_wlock();
@@ -2051,6 +2054,8 @@ private:
       ObDDLOperator &ddl_operator,
       ObMySQLTransaction &trans,
       common::ObIArray<share::schema::ObTableSchema> &tables);
+  int parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas);
+
   int try_force_drop_tenant(const share::schema::ObTenantSchema &tenant_schema);
 
   int handle_security_audit_in_trans(const share::schema::ObSAuditSchema &audit_schema,

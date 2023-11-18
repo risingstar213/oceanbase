@@ -963,33 +963,38 @@ int ObBootstrap::create_all_schema(ObDDLService &ddl_service,
       }
     }
 
-    int64_t begin = 0;
-    int64_t batch_count = BATCH_INSERT_SCHEMA_CNT;
-    const int64_t MAX_RETRY_TIMES = 3;
-    for (int64_t i = 0; OB_SUCC(ret) && i < table_schemas.count(); ++i) {
-      if (table_schemas.count() == (i + 1) || (i + 1 - begin) >= batch_count) {
-        int64_t retry_times = 1;
-        while (OB_SUCC(ret)) {
-          if (OB_FAIL(batch_create_schema(ddl_service, table_schemas, begin, i + 1))) {
-            LOG_WARN("batch create schema failed", K(ret), "table count", i + 1 - begin);
-            // bugfix:
-            if ((OB_SCHEMA_EAGAIN == ret
-                 || OB_ERR_WAIT_REMOTE_SCHEMA_REFRESH == ret)
-                && retry_times <= MAX_RETRY_TIMES) {
-              retry_times++;
-              ret = OB_SUCCESS;
-              LOG_INFO("schema error while create table, need retry", KR(ret), K(retry_times));
-              ob_usleep(1 * 1000 * 1000L); // 1s
-            }
-          } else {
-            break;
-          }
-        }
-        if (OB_SUCC(ret)) {
-          begin = i + 1;
-        }
-      }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(ddl_service.parallel_create_schemas_check_correlartion(OB_SYS_TENANT_ID, table_schemas))) {
+      LOG_WARN("create_all_schema", K(ret));
     }
+
+    // int64_t begin = 0;
+    // int64_t batch_count = BATCH_INSERT_SCHEMA_CNT;
+    // const int64_t MAX_RETRY_TIMES = 3;
+    // for (int64_t i = 0; OB_SUCC(ret) && i < table_schemas.count(); ++i) {
+    //   if (table_schemas.count() == (i + 1) || (i + 1 - begin) >= batch_count) {
+    //     int64_t retry_times = 1;
+    //     while (OB_SUCC(ret)) {
+    //       if (OB_FAIL(batch_create_schema(ddl_service, table_schemas, begin, i + 1))) {
+    //         LOG_WARN("batch create schema failed", K(ret), "table count", i + 1 - begin);
+    //         // bugfix:
+    //         if ((OB_SCHEMA_EAGAIN == ret
+    //              || OB_ERR_WAIT_REMOTE_SCHEMA_REFRESH == ret)
+    //             && retry_times <= MAX_RETRY_TIMES) {
+    //           retry_times++;
+    //           ret = OB_SUCCESS;
+    //           LOG_INFO("schema error while create table, need retry", KR(ret), K(retry_times));
+    //           ob_usleep(1 * 1000 * 1000L); // 1s
+    //         }
+    //       } else {
+    //         break;
+    //       }
+    //     }
+    //     if (OB_SUCC(ret)) {
+    //       begin = i + 1;
+    //     }
+    //   }
+    // }
   }
   LOG_INFO("end create all schemas", K(ret), "table count", table_schemas.count(),
            "time_used", ObTimeUtility::current_time() - begin_time);
@@ -1015,8 +1020,6 @@ int ObBootstrap::batch_create_schema(ObDDLService &ddl_service,
                             OB_SYS_TENANT_ID,
                             refreshed_schema_version))) {
       LOG_WARN("start transaction failed", KR(ret));
-    } else if (OB_FAIL(trans.enable_async(&ddl_service.get_sql_proxy(), OB_SYS_TENANT_ID))) {
-      LOG_WARN("cannot enable async", KR(ret));
     } else {
       bool is_truncate_table = false;
       for (int64_t i = begin; OB_SUCC(ret) && i < end; ++i) {

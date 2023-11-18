@@ -347,8 +347,6 @@ void ObAsyncSqlWorker::run1()
     } else {
       const uint64_t end_time = ObTimeUtility::current_time();
       LOG_INFO("query_write_async succ", "rows", affected_rows, "cost", end_time - start_time);
-      int num = work_queue_.size();
-      LOG_INFO("query_write_async", "rest num", num);
     }
 
     cond_.lock();
