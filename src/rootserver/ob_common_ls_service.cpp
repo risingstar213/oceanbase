@@ -137,6 +137,7 @@ int ObCommonLSService::try_create_ls_(const share::schema::ObTenantSchema &tenan
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < status_info_array.count(); ++i) {
       const ObLSStatusInfo &status_info = status_info_array.at(i);
+      LOG_INFO("try_create_ls_", "id", status_info.ls_id_, "status", status_info.get_status());
       if (status_info.ls_is_creating()) {
         recovery_stat.reset();
         if (OB_FAIL(ls_recovery_operator.get_ls_recovery_stat(
