@@ -57,7 +57,7 @@ class ElectionImpl : public Election
 public:
   ElectionImpl();
   ~ElectionImpl();
-  void set_max_tst(int64_t tst);
+  void set_single_node(bool is_single);
   int init_and_start(const int64_t id,
                      common::ObOccamTimer *election_timer,
                      ElectionMsgSender *msg_handler,
@@ -296,6 +296,8 @@ private:
   LsBiggestMinClusterVersionEverSeen ls_biggest_min_cluster_version_ever_seen_;// 为仲裁副本维护的日志流级别的min_cluster_version值，用于处理选举兼容性升级相关问题
   EventRecorder event_recorder_;// 事件汇报模块
   mutable ElectionMsgCounter msg_counter_;// 监控模块
+
+  bool is_single_node_ = false;
 };
 
 }// namespace election

@@ -2834,13 +2834,7 @@ int PalfHandleImpl::do_init_mem_(
     member_list.get_addr_array(addr_list);
     only_one_member = (addr_list.size() == 0);
     LOG_INFO("size: ", K(addr_list.size()));
-    if (only_one_member) {
-      election_.set_max_tst(100_ms);
-      LOG_INFO("set 100ms");
-    } else {
-      election_.set_max_tst(1_s);
-      LOG_INFO("set 1s");
-    }
+    election_.set_single_node(only_one_member);
   }
   // inner priority seed: smaller means higher priority
   // reserve some bits for future requirements

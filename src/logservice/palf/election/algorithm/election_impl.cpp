@@ -81,9 +81,14 @@ ElectionImpl::~ElectionImpl()
   #undef PRINT_WRAPPER
 }
 
-void ElectionImpl::set_max_tst(int64_t tst)
+void ElectionImpl::set_single_node(bool is_single)
 {
-  MAX_TST = tst;
+  is_single_node_ = is_single;
+  if (is_single) {
+    MAX_TST = 100_ms;
+  } else {
+    MAX_TST = 1_s;
+  }
 }
 
 int ElectionImpl::init_and_start(const int64_t id,

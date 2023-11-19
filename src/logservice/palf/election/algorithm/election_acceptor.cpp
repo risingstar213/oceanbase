@@ -37,6 +37,17 @@ do {\
   }\
 } while(0)
 
+#define CHECK_SILENCE_SINGLE()\
+do {\
+  if (ATOMIC_LOAD(&INIT_TS) < 0) {\
+    ELECT_LOG_RET(ERROR, common::OB_ERROR, "INIT_TS is less than 0, may not call GLOBAL_INIT_ELECTION_MODULE yet!", K(*this));\
+    return;\
+  } else if (OB_UNLIKELY(get_monotonic_ts() < ATOMIC_LOAD(&INIT_TS) + MAX_LEASE_TIME_SINGLE)) {\
+    ELECT_LOG(INFO, "keep silence for safty, won't send response", K(*this));\
+    return;\
+  }\
+} while(0)
+
 template <typename Type>
 struct ResponseType {};
 
@@ -223,7 +234,11 @@ void ElectionAcceptor::on_prepare_request(const ElectionPrepareRequestMsg &prepa
 {
   ELECT_TIME_GUARD(500_ms);
   #define PRINT_WRAPPER KR(ret), K(prepare_req), K(*this)
-  CHECK_SILENCE();// 启动后的要维持一段静默时间，acceptor假装看不到任何消息，以维护lease的正确语义
+  if (!p_election_->is_single_node_) {
+    CHECK_SILENCE();// 启动后的要维持一段静默时间，acceptor假装看不到任何消息，以维护lease的正确语义
+  } else {
+    CHECK_SILENCE_SINGLE();
+  }
   int ret = OB_SUCCESS;
   LogPhase phase = (prepare_req.get_role() == common::ObRole::FOLLOWER ? LogPhase::ELECT_LEADER : LogPhase::RENEW_LEASE);
   LOG_PHASE(INFO, phase, "handle prepare request");
@@ -307,7 +322,11 @@ void ElectionAcceptor::on_accept_request(const ElectionAcceptRequestMsg &accept_
 {
   ELECT_TIME_GUARD(500_ms);
   #define PRINT_WRAPPER KR(ret), K(accept_req), K(*this)
-  CHECK_SILENCE();// 启动后的要维持一段静默时间，acceptor假装看不到任何消息，以维护lease的语义
+ if (!p_election_->is_single_node_) {
+    CHECK_SILENCE();// 启动后的要维持一段静默时间，acceptor假装看不到任何消息，以维护lease的正确语义
+  } else {
+    CHECK_SILENCE_SINGLE();
+  }
   int ret = OB_SUCCESS;
   if (OB_LIKELY(RequestChecker::check_ballot_valid(accept_req,
                                                    this,
