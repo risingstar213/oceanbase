@@ -830,7 +830,10 @@ int ObInnerSQLConnection::query(sqlclient::ObIExecutor &executor,
             ret_code = ret;
             LOG_WARN("execute failed", K(ret), K(tenant_id), K(executor), K(retry_cnt),
                 K(local_sys_schema_version), K(local_tenant_schema_version));
-            ret = process_retry(res, ret, abs_timeout_us, need_retry, retry_cnt);
+            
+            if (ret != OB_SERVER_IS_INIT && ret != OB_NOT_INIT) {
+              ret = process_retry(res, ret, abs_timeout_us, need_retry, retry_cnt);
+            }
             // moved here from ObInnerSQLConnection::do_query() -> ObInnerSQLResult::open().
             int close_ret = res.force_close();
             if (OB_SUCCESS != close_ret) {
