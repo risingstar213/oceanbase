@@ -235,7 +235,7 @@ int ObHeartbeatService::send_heartbeat_()
     ret = OB_ERR_UNEXPECTED;
     HBS_LOG_ERROR("srv_rpc_proxy_ is null", KR(ret), KP(srv_rpc_proxy_));
   } else {
-    ObTimeGuard time_guard("ObHeartbeatService::send_heartbeat_", 2 * 1000 * 1000);
+    ObTimeGuard time_guard("ObHeartbeatService::send_heartbeat_", 1 * 1000 * 1000);
     // step 1: prepare hb_requests based on the whitelist
     if (OB_FAIL(prepare_hb_requests_(hb_requests, tmp_whitelist_epoch_id))) {
       LOG_WARN("fail to prepare heartbeat requests", KR(ret));
@@ -386,7 +386,7 @@ int ObHeartbeatService::manage_heartbeat_()
     ret = OB_NOT_INIT;
     LOG_WARN("not init", KR(ret), K(is_inited_));
   } else {
-    ObTimeGuard time_guard("ObHeartbeatService::manage_heartbeat_", 2 * 1000 * 1000);
+    ObTimeGuard time_guard("ObHeartbeatService::manage_heartbeat_", 1 * 1000 * 1000);
     int tmp_ret = OB_SUCCESS;
     if (OB_TMP_FAIL(prepare_whitelist_())) {
       ret = OB_SUCC(ret) ? tmp_ret : ret;
@@ -1060,6 +1060,7 @@ int ObHeartbeatService::update_table_for_server_with_hb_response_(
       }
     }
     // *********  check start_service_time ********* //
+    LOG_INFO("check start_service_time", "old", server_info_in_table.get_start_service_time(), "new", hb_response.get_start_service_time());
     if (OB_SUCC(ret) && server_info_in_table.get_start_service_time() != hb_response.get_start_service_time()) {
       if (OB_FAIL(ObServerTableOperator::update_start_service_time(
           trans,
