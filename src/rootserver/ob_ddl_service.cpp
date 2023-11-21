@@ -22612,21 +22612,22 @@ int ObDDLService::create_normal_tenant(
   } else if (OB_FAIL(insert_restore_tenant_job(tenant_id, tenant_schema.get_tenant_name(), tenant_role))) {
     LOG_WARN("failed to insert restore tenant job", KR(ret), K(tenant_id), K(tenant_role), K(tenant_schema));
   } else if (OB_FAIL(create_tenant_sys_ls(tenant_schema, pool_list, create_ls_with_palf, palf_base_info))) {
-    // 3s find leader
+    // 0.8s find leader
     LOG_WARN("fail to create tenant sys log stream", KR(ret), K(tenant_schema), K(pool_list), K(palf_base_info));
   } else if (is_user_tenant(tenant_id) && !tenant_role.is_primary()) {
     //standby cluster no need create sys tablet and init tenant schema
   } else if (OB_FAIL(ObSchemaUtils::construct_inner_table_schemas(tenant_id, tables))) {
     LOG_WARN("fail to get inner table schemas in tenant space", KR(ret), K(tenant_id));
   } else if (OB_FAIL(broadcast_sys_table_schemas(tenant_id, tables))) {
+    // 0.2s
     LOG_WARN("fail to broadcast sys table schemas", KR(ret), K(tenant_id));
   } else if (OB_FAIL(create_tenant_sys_tablets(tenant_id, tables))) {
-    // 1s
+    // 0.5s
     LOG_WARN("fail to create tenant partitions", KR(ret), K(tenant_id));
   } else if (OB_FAIL(init_tenant_schema(tenant_id, tenant_schema,
              tenant_role, recovery_until_scn, tables, sys_variable, init_configs,
              is_creating_standby, log_restore_source))) {
-    // 17.5s
+    // 1.2s
     LOG_WARN("fail to init tenant schema", KR(ret), K(tenant_role), K(recovery_until_scn),
              K(tenant_id), K(tenant_schema), K(sys_variable), K(init_configs),
              K(is_creating_standby), K(log_restore_source));
