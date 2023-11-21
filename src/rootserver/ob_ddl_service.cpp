@@ -22005,26 +22005,72 @@ int ObDDLService::create_tenant(
                meta_tenant_schema, init_configs))) {
       LOG_WARN("fail to create tenant schema", KR(ret), K(arg));
     } else {
-      DEBUG_SYNC(BEFORE_CREATE_META_TENANT);
       // create ls/tablet/schema in tenant space
       ObArray<ObResourcePoolName> pools;
       if (OB_FAIL(get_pools(arg.pool_list_, pools))) {
         LOG_WARN("get_pools failed", KR(ret), K(arg));
-      } else if (OB_FAIL(create_normal_tenant(meta_tenant_id, pools, meta_tenant_schema, tenant_role,
-        recovery_until_scn, meta_sys_variable, false/*create_ls_with_palf*/, meta_palf_base_info, init_configs,
-        arg.is_creating_standby_, arg.log_restore_source_))) {
-        LOG_WARN("fail to create meta tenant", KR(ret), K(meta_tenant_id), K(pools), K(meta_sys_variable),
-            K(tenant_role), K(recovery_until_scn), K(meta_palf_base_info), K(init_configs));
-      } else {
+      }
+
+      enable_meta_user_parallel_ = true;
+      meta_user_parallel_sync_ = false;
+
+      int th_ret1; int th_ret2;
+      ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
+      std::thread th1([&]() {
+        // DEBUG_SYNC(BEFORE_CREATE_META_TENANT);
+        int ret = OB_SUCCESS;
+        set_thread_name("create_tenant_meta");
+        ObCurTraceId::set(*cur_trace_id);
+
+        if (OB_FAIL(create_normal_tenant(meta_tenant_id, pools, meta_tenant_schema, tenant_role,
+          recovery_until_scn, meta_sys_variable, false/*create_ls_with_palf*/, meta_palf_base_info, init_configs,
+          arg.is_creating_standby_, arg.log_restore_source_))) {
+          LOG_WARN("fail to create meta tenant", KR(ret), K(meta_tenant_id), K(pools), K(meta_sys_variable),
+              K(tenant_role), K(recovery_until_scn), K(meta_palf_base_info), K(init_configs));
+        }
+
+        ATOMIC_SET(&th_ret1, ret);
+      });
+
+      std::thread th2([&]() {
+        int ret = OB_SUCCESS;
+        set_thread_name("create_tenant_user");
+        ObCurTraceId::set(*cur_trace_id);
         ObString empty_str;
-        DEBUG_SYNC(BEFORE_CREATE_USER_TENANT);
+        // DEBUG_SYNC(BEFORE_CREATE_USER_TENANT);
         if (OB_FAIL(create_normal_tenant(user_tenant_id, pools, user_tenant_schema, tenant_role,
               recovery_until_scn, user_sys_variable, create_ls_with_palf, user_palf_base_info, init_configs,
               false /* is_creating_standby */, empty_str))) {
           LOG_WARN("fail to create user tenant", KR(ret), K(user_tenant_id), K(pools), K(user_sys_variable),
               K(tenant_role), K(recovery_until_scn), K(user_palf_base_info));
         }
+
+        ATOMIC_SET(&th_ret2, ret);
+      });
+
+      th1.join(); th2.join();
+      if (OB_SUCC(ret)) {
+        ret = th_ret1 && th_ret2;
       }
+
+      enable_meta_user_parallel_ = false;
+      meta_user_parallel_sync_ = false;
+
+      // if (OB_FAIL(create_normal_tenant(meta_tenant_id, pools, meta_tenant_schema, tenant_role,
+      //   recovery_until_scn, meta_sys_variable, false/*create_ls_with_palf*/, meta_palf_base_info, init_configs,
+      //   arg.is_creating_standby_, arg.log_restore_source_))) {
+      //   LOG_WARN("fail to create meta tenant", KR(ret), K(meta_tenant_id), K(pools), K(meta_sys_variable),
+      //       K(tenant_role), K(recovery_until_scn), K(meta_palf_base_info), K(init_configs));
+      // } else {
+      //   ObString empty_str;
+      //   DEBUG_SYNC(BEFORE_CREATE_USER_TENANT);
+      //   if (OB_FAIL(create_normal_tenant(user_tenant_id, pools, user_tenant_schema, tenant_role,
+      //         recovery_until_scn, user_sys_variable, create_ls_with_palf, user_palf_base_info, init_configs,
+      //         false /* is_creating_standby */, empty_str))) {
+      //     LOG_WARN("fail to create user tenant", KR(ret), K(user_tenant_id), K(pools), K(user_sys_variable),
+      //         K(tenant_role), K(recovery_until_scn), K(user_palf_base_info));
+      //   }
+      // }
       // drop tenant if create tenant failed.
       // meta tenant will be force dropped with its user tenant.
       if (OB_FAIL(ret) && tenant_role.is_primary()) {
@@ -22601,6 +22647,7 @@ int ObDDLService::create_normal_tenant(
   LOG_INFO("[CREATE_TENANT] STEP 2. start create tenant", K(tenant_id), K(tenant_schema));
   int ret = OB_SUCCESS;
   ObSArray<ObTableSchema> tables;
+  bool wait_for_sync = enable_meta_user_parallel_ && is_user_tenant(tenant_id);
   if (OB_FAIL(check_inner_stat())) {
     LOG_WARN("variable is not init", KR(ret));
   } else if (OB_UNLIKELY(!recovery_until_scn.is_valid_and_not_min())) {
@@ -22611,6 +22658,13 @@ int ObDDLService::create_normal_tenant(
     LOG_WARN("tenant_id is invalid", KR(ret), K(tenant_id));
   } else if (OB_FAIL(insert_restore_tenant_job(tenant_id, tenant_schema.get_tenant_name(), tenant_role))) {
     LOG_WARN("failed to insert restore tenant job", KR(ret), K(tenant_id), K(tenant_role), K(tenant_schema));
+  }
+
+  if (wait_for_sync) {
+    while (!meta_user_parallel_sync_);
+  }
+
+  if (OB_FAIL(ret)) {
   } else if (OB_FAIL(create_tenant_sys_ls(tenant_schema, pool_list, create_ls_with_palf, palf_base_info))) {
     // 0.8s find leader
     LOG_WARN("fail to create tenant sys log stream", KR(ret), K(tenant_schema), K(pool_list), K(palf_base_info));
@@ -23089,7 +23143,40 @@ int ObDDLService::init_tenant_schema(
     // 2. init tenant schema
     if (OB_SUCC(ret)) {
       // init schema first to avoid transactions
-      if (OB_FAIL(parallel_create_schemas_check_correlartion(tenant_id, tables))) {
+      bool generate_sync = enable_meta_user_parallel_ && is_meta_tenant(tenant_id);
+      if (generate_sync) {
+        if (OB_FAIL(parallel_create_schemas_user_dep(tenant_id, tables))) {
+          LOG_WARN("fail to create sys tables", KR(ret), K(tenant_id));
+        }
+        ObDDLOperator ddl_operator(*schema_service_, *sql_proxy_);
+        ObDDLSQLTransaction trans(schema_service_, true, true, false, false);
+        const int64_t refreshed_schema_version = 0;
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(trans.start(sql_proxy_, tenant_id, refreshed_schema_version))) {
+          LOG_WARN("fail to start trans", KR(ret), K(tenant_id));
+        } else if (OB_FAIL(ddl_operator.init_tenant_env(tenant_schema, sys_variable, tenant_role,
+                                                      recovery_until_scn, init_configs, trans))) {
+          LOG_WARN("init tenant env failed", KR(ret), K(tenant_role), K(recovery_until_scn), K(tenant_schema));
+        }
+
+        if (trans.is_started()) {
+          int temp_ret = OB_SUCCESS;
+          bool commit = OB_SUCC(ret);
+          if (OB_SUCCESS != (temp_ret = trans.end(commit))) {
+            ret = (OB_SUCC(ret)) ? temp_ret : ret;
+            LOG_WARN("trans end failed", K(commit), K(temp_ret));
+          }
+        }
+
+        LOG_INFO("send sync signal");
+        ATOMIC_SET(&meta_user_parallel_sync_, true);
+        
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(parallel_create_schemas_check_correlartion_without_dep(tenant_id, tables))) {
+          LOG_WARN("fail to create sys tables", KR(ret), K(tenant_id));
+        }
+
+      } else if (OB_FAIL(parallel_create_schemas_check_correlartion(tenant_id, tables))) {
         LOG_WARN("fail to create sys tables", KR(ret), K(tenant_id));
       }
       ObDDLOperator ddl_operator(*schema_service_, *sql_proxy_);
@@ -23110,7 +23197,7 @@ int ObDDLService::init_tenant_schema(
       } else if (OB_FAIL(ddl_operator.replace_sys_variable(
                  sys_variable, new_schema_version, trans, OB_DDL_ALTER_SYS_VAR))) {
         LOG_WARN("fail to replace sys variable", KR(ret), K(sys_variable));
-      } else if (OB_FAIL(ddl_operator.init_tenant_env(tenant_schema, sys_variable, tenant_role,
+      } else if (!generate_sync && OB_FAIL(ddl_operator.init_tenant_env(tenant_schema, sys_variable, tenant_role,
                                                       recovery_until_scn, init_configs, trans))) {
         LOG_WARN("init tenant env failed", KR(ret), K(tenant_role), K(recovery_until_scn), K(tenant_schema));
       } else if (OB_FAIL(ddl_operator.insert_tenant_merge_info(OB_DDL_ADD_TENANT_START, tenant_schema, trans))) {
@@ -23399,6 +23486,10 @@ int ObDDLService::parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSc
 
   LOG_INFO("parallel_create_schemas start", "count", table_schemas.count());
 
+  if (table_schemas.count() < 50) {
+    return batch_create_schema_local(tenant_id, table_schemas, 0, table_schemas.count());
+  }
+
   std::vector<std::thread> ths;
   ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
   for (int64_t i = 0; OB_SUCC(ret) && i < table_schemas.count(); ++i) {
@@ -23460,8 +23551,101 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
     bool has_dep = 
       (table.is_index_table() || table.is_materialized_view() || table.is_aux_vp_table() || table.is_aux_lob_table()) &&
       !(ObSysTableChecker::is_sys_table_index_tid(table.get_table_id()) || is_sys_lob_table(table.get_table_id()));
+    if (has_dep && (table_ids.count(table.get_data_table_id()) == 0)) {
+      flag = false;
+      next_round_tables.push_back(&table);
+    } else {
+      tmp_ids.insert(table.get_table_id());
+      this_round_tables.push_back(&table);
+    }
+  }
+  table_ids.insert(tmp_ids.begin(), tmp_ids.end());
 
-    if (has_dep && table_ids.count(table.get_data_table_id()) == 0) {
+  if (OB_FAIL(parallel_create_schemas(tenant_id, this_round_tables))) {
+    LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
+    return ret;
+  }
+  
+  while (!flag) {
+    flag = true;
+    ObSArray<ObTableSchema*> tmp_tables;
+    std::unordered_set<uint64_t> tmp_ids;
+    this_round_tables.reset(); this_round_tables.reuse();
+    for (int i = 0; i < next_round_tables.count(); i++) {
+      ObTableSchema &table = *next_round_tables.at(i);
+      bool has_dep = 
+        (table.is_index_table() || table.is_materialized_view() || table.is_aux_vp_table() || table.is_aux_lob_table()) &&
+        !(ObSysTableChecker::is_sys_table_index_tid(table.get_table_id()) || is_sys_lob_table(table.get_table_id()));
+
+      if (has_dep && table_ids.count(table.get_data_table_id()) == 0) {
+        flag = false;
+        tmp_tables.push_back(&table);
+      } else {
+        tmp_ids.insert(table.get_table_id());
+        this_round_tables.push_back(&table);
+      }
+    }
+    table_ids.insert(tmp_ids.begin(), tmp_ids.end());
+
+    if (OB_FAIL(parallel_create_schemas(tenant_id, this_round_tables))) {
+      LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
+      return ret;
+    }
+
+    next_round_tables.reset(); next_round_tables.reuse();
+    next_round_tables.assign(tmp_tables);
+  }
+
+  return ret;
+}
+
+std::unordered_set<uint64_t> sync_ids{1, 5, 342, 345, 352, 366};
+// __all_core_table __all_ddl_operation __all_ls_status __all_ls
+
+int ObDDLService::parallel_create_schemas_user_dep(uint64_t tenant_id, ObIArray<ObTableSchema> &table_schemas)
+{
+  int ret = OB_SUCCESS;
+
+  ObSArray<ObTableSchema*> this_round_tables;
+
+  for (int i = 0; i < table_schemas.count(); i++) {
+    ObTableSchema &table = table_schemas.at(i);
+    if (sync_ids.count(table.get_table_id()) != 0) {
+      this_round_tables.push_back(&table);
+    }
+  }
+
+  if (OB_FAIL(parallel_create_schemas(tenant_id, this_round_tables))) {
+    LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
+    return ret;
+  }
+
+  return ret;
+}
+
+int ObDDLService::parallel_create_schemas_check_correlartion_without_dep(uint64_t tenant_id, ObIArray<ObTableSchema> &table_schemas)
+{
+  int ret = OB_SUCCESS;
+  
+  ObSArray<ObTableSchema*> this_round_tables;
+  ObSArray<ObTableSchema*> next_round_tables;
+
+  ObIArray<ObTableSchema> &refer_tables = table_schemas;
+  std::unordered_set<uint64_t> table_ids;
+
+  bool flag = true;
+
+  std::unordered_set<uint64_t> tmp_ids;
+  for (int i = 0; i < table_schemas.count(); i++) {
+    ObTableSchema &table = table_schemas.at(i);
+    if (sync_ids.count(table.get_table_id()) != 0) {
+      tmp_ids.insert(table.get_table_id());
+      continue;
+    }
+    bool has_dep = 
+      (table.is_index_table() || table.is_materialized_view() || table.is_aux_vp_table() || table.is_aux_lob_table()) &&
+      !(ObSysTableChecker::is_sys_table_index_tid(table.get_table_id()) || is_sys_lob_table(table.get_table_id()));
+    if (has_dep && (table_ids.count(table.get_data_table_id()) == 0)) {
       flag = false;
       next_round_tables.push_back(&table);
     } else {

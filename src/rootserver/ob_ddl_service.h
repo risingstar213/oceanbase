@@ -1976,6 +1976,10 @@ public:
 
   int batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, const int64_t begin, const int64_t end);
   int parallel_create_schemas_check_correlartion(uint64_t tenant_id, ObIArray<ObTableSchema> &table_schemas);
+
+  int parallel_create_schemas_user_dep(uint64_t tenant_id, ObIArray<ObTableSchema> &table_schemas);
+
+  int parallel_create_schemas_check_correlartion_without_dep(uint64_t tenant_id, ObIArray<ObTableSchema> &table_schemas);
 public:
   int ddl_rlock();
   int ddl_wlock();
@@ -2583,6 +2587,9 @@ private:
   // for paralled ddl to cache oracle's index name map
   share::schema::ObIndexNameChecker index_name_checker_;
   share::schema::ObNonPartitionedTableTabletAllocator non_partitioned_tablet_allocator_;
+
+  volatile bool enable_meta_user_parallel_ = false;
+  volatile bool meta_user_parallel_sync_   = false;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObDDLService);
 };
