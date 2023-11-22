@@ -236,8 +236,6 @@ void ElectionAcceptor::on_prepare_request(const ElectionPrepareRequestMsg &prepa
   #define PRINT_WRAPPER KR(ret), K(prepare_req), K(*this)
   if (!p_election_->is_single_node_) {
     CHECK_SILENCE();// 启动后的要维持一段静默时间，acceptor假装看不到任何消息，以维护lease的正确语义
-  } else {
-    CHECK_SILENCE_SINGLE();
   }
   int ret = OB_SUCCESS;
   LogPhase phase = (prepare_req.get_role() == common::ObRole::FOLLOWER ? LogPhase::ELECT_LEADER : LogPhase::RENEW_LEASE);
@@ -324,8 +322,6 @@ void ElectionAcceptor::on_accept_request(const ElectionAcceptRequestMsg &accept_
   #define PRINT_WRAPPER KR(ret), K(accept_req), K(*this)
  if (!p_election_->is_single_node_) {
     CHECK_SILENCE();// 启动后的要维持一段静默时间，acceptor假装看不到任何消息，以维护lease的正确语义
-  } else {
-    CHECK_SILENCE_SINGLE();
   }
   int ret = OB_SUCCESS;
   if (OB_LIKELY(RequestChecker::check_ballot_valid(accept_req,
