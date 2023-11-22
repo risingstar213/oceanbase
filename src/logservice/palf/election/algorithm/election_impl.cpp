@@ -85,7 +85,7 @@ void ElectionImpl::set_single_node(bool is_single)
 {
   is_single_node_ = is_single;
   if (is_single) {
-    MAX_TST = 100_ms;
+    MAX_TST = 50_ms;
   } else {
     MAX_TST = 1_s;
   }

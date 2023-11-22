@@ -22658,8 +22658,9 @@ int ObDDLService::create_normal_tenant(
     LOG_WARN("tenant_id is invalid", KR(ret), K(tenant_id));
   } else if (OB_FAIL(insert_restore_tenant_job(tenant_id, tenant_schema.get_tenant_name(), tenant_role))) {
     LOG_WARN("failed to insert restore tenant job", KR(ret), K(tenant_id), K(tenant_role), K(tenant_schema));
+  } else if (OB_FAIL(ObSchemaUtils::construct_inner_table_schemas(tenant_id, tables))) {
+    LOG_WARN("fail to get inner table schemas in tenant space", KR(ret), K(tenant_id));
   }
-
   if (wait_for_sync) {
     while (!meta_user_parallel_sync_);
   }
@@ -22670,8 +22671,8 @@ int ObDDLService::create_normal_tenant(
     LOG_WARN("fail to create tenant sys log stream", KR(ret), K(tenant_schema), K(pool_list), K(palf_base_info));
   } else if (is_user_tenant(tenant_id) && !tenant_role.is_primary()) {
     //standby cluster no need create sys tablet and init tenant schema
-  } else if (OB_FAIL(ObSchemaUtils::construct_inner_table_schemas(tenant_id, tables))) {
-    LOG_WARN("fail to get inner table schemas in tenant space", KR(ret), K(tenant_id));
+  // } else if (OB_FAIL(ObSchemaUtils::construct_inner_table_schemas(tenant_id, tables))) {
+  //   LOG_WARN("fail to get inner table schemas in tenant space", KR(ret), K(tenant_id));
   } else if (OB_FAIL(broadcast_sys_table_schemas(tenant_id, tables))) {
     // 0.2s
     LOG_WARN("fail to broadcast sys table schemas", KR(ret), K(tenant_id));
