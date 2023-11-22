@@ -240,7 +240,8 @@ int ObHeartbeatService::send_heartbeat_()
     if (OB_FAIL(prepare_hb_requests_(hb_requests, tmp_whitelist_epoch_id))) {
       LOG_WARN("fail to prepare heartbeat requests", KR(ret));
     } else if (hb_requests.count() <= 0) {
-      // ret = OB_NEED_WAIT;
+      // more frequent
+      ret = OB_NEED_WAIT;
       LOG_INFO("no heartbeat request needs to be sent");
     } else {
       time_guard.click("end prepare_hb_requests");
@@ -272,6 +273,14 @@ int ObHeartbeatService::send_heartbeat_()
         LOG_WARN("fail to set hb_responses", KR(ret));
       }
       time_guard.click("end set_hb_responses");
+      // check response
+      if (OB_SUCC(ret)) {
+        int hb_cnt = hb_responses_.count();
+        if (hb_cnt > 0 && (hb_responses_.at(hb_cnt - 1).get_start_service_time() == 0)) {
+          LOG_INFO("need more frequent heartbeat!");
+          ret = OB_NEED_WAIT;
+        }
+      }
     }
   }
   FLOG_INFO("send_heartbeat_ has finished one round", KR(ret));
@@ -538,6 +547,14 @@ int ObHeartbeatService::process_hb_responses_()
     }
     if (FAILEDx(clear_deleted_servers_in_all_servers_hb_info_())) {
       LOG_WARN("fail to clear deleted servers in all_servers_hb_info_", KR(ret));
+    }
+    // check response
+    if (OB_SUCC(ret)) {
+      int hb_cnt = tmp_hb_responses.count();
+      if (hb_cnt > 0 && (tmp_hb_responses.at(hb_cnt - 1).get_start_service_time() == 0)) {
+        LOG_INFO("need more frequent heartbeat!");
+        ret = OB_NEED_WAIT;
+      }
     }
   }
   return ret;

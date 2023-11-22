@@ -1031,7 +1031,7 @@ int ObServer::start()
     while (OB_SUCC(ret) && !stop_ && !timezone_usable) {
       timezone_usable = tenant_timezone_mgr_.is_usable();
       if (!timezone_usable) {
-        SLEEP(1);
+        USLEEP(100 * 1000);
       }
     }
     FLOG_INFO("check if timezone usable", KR(ret), K(stop_), K(timezone_usable));
