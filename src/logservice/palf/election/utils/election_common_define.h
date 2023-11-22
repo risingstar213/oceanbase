@@ -110,7 +110,7 @@ enum class PRIORITY_SEED_BIT : uint64_t
 constexpr int64_t MSG_DELAY_WARN_THRESHOLD = 200_ms;
 constexpr int64_t MAX_LEASE_TIME = 10_s;
 
-constexpr int64_t MAX_LEASE_TIME_SINGLE = 1_s;
+constexpr int64_t MAX_LEASE_TIME_SINGLE = 500_ms;
 constexpr int64_t PRIORITY_BUFFER_SIZE = 512;
 constexpr int64_t INVALID_VALUE = -1;// 所有int64_t变量的初始默认无效值
 constexpr int64_t CACHE_EXPIRATION_TIME = 5_s;
