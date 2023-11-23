@@ -99,6 +99,35 @@ void ObPrimaryLSService::do_work()
   }
 }
 
+int ObPrimaryLSService::process_one_round(uint64_t tenant_id)
+{
+  int ret = OB_SUCCESS;
+  ObPrimaryLSService tmp_service;
+  tmp_service.tenant_id_ = tenant_id;
+  tmp_service.inited_    = true;
+
+  int tmp_ret = OB_SUCCESS;
+  share::schema::ObTenantSchema tenant_schema;
+  if (OB_FAIL(get_tenant_schema(tenant_id, tenant_schema))) {
+    LOG_WARN("failed to get tenant schema", KR(ret), K(tenant_id));
+  } else {
+    if (OB_TMP_FAIL(tmp_service.process_all_ls(tenant_schema))) {
+      ret = OB_SUCC(ret) ? tmp_ret : ret;
+      LOG_WARN("failed to process user tenant thread0", KR(ret),
+          KR(tmp_ret), K(tenant_id));
+    }
+    if (OB_TMP_FAIL(tmp_service.process_all_ls_status_to_steady_(tenant_schema))) {
+      ret = OB_SUCC(ret) ? tmp_ret : ret;
+      LOG_WARN("failed to process user tenant thread1", KR(ret), KR(tmp_ret),
+          K(tenant_id));
+    }
+  }
+
+  LOG_INFO("[PRIMARY_LS_SERVICE] finish one round", KR(ret), K(tenant_schema));
+
+  return ret;
+}
+
 
 int ObPrimaryLSService::process_all_ls(const share::schema::ObTenantSchema &tenant_schema)
 {

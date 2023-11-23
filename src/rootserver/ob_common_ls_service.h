@@ -70,6 +70,8 @@ public:
   virtual void do_work() override;
   DEFINE_MTL_FUNC(ObCommonLSService)
 
+  static int process_one_round(uint64_t tenant_id);
+
 public:
   virtual share::SCN get_rec_scn() override { return share::SCN::max_scn();}
   virtual int flush(share::SCN &scn) override { return OB_SUCCESS; }
