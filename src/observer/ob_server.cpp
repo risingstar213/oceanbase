@@ -1076,7 +1076,20 @@ int ObServer::start()
     wait();
   } else if (!stop_) {
     GCTX.status_ = SS_SERVING;
-    GCTX.start_service_time_ = ObTimeUtility::current_time();
+    // update time
+    int64_t start_time = ObTimeUtility::current_time();
+    common::ObMySQLTransaction trans;
+    trans.start(GCTX.sql_proxy_, OB_SYS_TENANT_ID);
+    ObServerTableOperator::update_start_service_time(
+      trans,
+      self_addr_,
+      0,
+      start_time
+    );
+    trans.end(true);
+    GCTX.start_service_time_ = start_time;
+
+    SVR_TRACER.refresh();
     FLOG_INFO("[OBSERVER_NOTICE] observer start service", "start_service_time", GCTX.start_service_time_);
   } else {
     FLOG_INFO("[OBSERVER_NOTICE] observer is set to stop", KR(ret), K_(stop));
