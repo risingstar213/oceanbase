@@ -535,7 +535,7 @@ int ObLocationService::check_ls_exist(
     SMART_VAR(ObISQLClient::ReadResult, result) {
       int64_t ls_state = -1;
       common::sqlclient::ObMySQLResult *res = NULL;
-      const uint64_t exec_tenant_id = get_private_table_exec_tenant_id(tenant_id);
+      const uint64_t exec_tenant_id = OB_SYS_TENANT_ID; // get_private_table_exec_tenant_id(tenant_id);
       if (OB_FAIL(GCTX.sql_proxy_->read(result, exec_tenant_id, sql.ptr()))) {
         LOG_WARN("execute sql failed", KR(ret),
             K(tenant_id), K(ls_id), K(exec_tenant_id), K(sql));

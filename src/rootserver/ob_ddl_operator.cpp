@@ -5275,6 +5275,29 @@ int ObDDLOperator::init_tenant_env(
     }
   }
 
+  // if (OB_SUCC(ret) && is_meta_tenant(tenant_id)) {
+  //   const uint64_t user_tenant_id = gen_user_tenant_id(tenant_id);
+  //   ObAllTenantInfo tenant_info;
+  //   if (OB_FAIL(tenant_info.init(user_tenant_id, tenant_role, NORMAL_SWITCHOVER_STATUS, 0,
+  //               SCN::base_scn(), SCN::base_scn(), SCN::base_scn(), recovery_until_scn))) {
+  //     LOG_WARN("failed to init tenant info", KR(ret), K(tenant_id), K(tenant_role));
+  //   } else if (OB_FAIL(ObAllTenantInfoProxy::init_tenant_info(tenant_info, &trans))) {
+  //     LOG_WARN("failed to init tenant info", KR(ret), K(tenant_info));
+  //   }
+  // }
+
+  return ret;
+}
+
+int ObDDLOperator::init_user_tenant_info(
+  const ObTenantSchema &tenant_schema,
+  const ObSysVariableSchema &sys_variable,
+  const share::ObTenantRole &tenant_role,
+  const SCN &recovery_until_scn,
+  common::ObMySQLTransaction &trans)
+{
+  int ret = OB_SUCCESS;
+  const uint64_t tenant_id = tenant_schema.get_tenant_id();
   if (OB_SUCC(ret) && is_meta_tenant(tenant_id)) {
     const uint64_t user_tenant_id = gen_user_tenant_id(tenant_id);
     ObAllTenantInfo tenant_info;
@@ -5285,7 +5308,6 @@ int ObDDLOperator::init_tenant_env(
       LOG_WARN("failed to init tenant info", KR(ret), K(tenant_info));
     }
   }
-
   return ret;
 }
 

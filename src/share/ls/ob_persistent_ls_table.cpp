@@ -128,7 +128,7 @@ int ObPersistentLSTable::fetch_ls_info_(
 {
   int ret = OB_SUCCESS;
   const char *table_name_meta = OB_ALL_LS_META_TABLE_TNAME;
-  const uint64_t sql_tenant_id = get_private_table_exec_tenant_id(tenant_id);
+  const uint64_t sql_tenant_id = OB_SYS_TENANT_ID; // get_private_table_exec_tenant_id(tenant_id);
   if (OB_UNLIKELY(!is_inited())) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObPersistentLSTable not init", KR(ret));
@@ -335,7 +335,7 @@ int ObPersistentLSTable::update(
   AutoTransProxy proxy(*sql_proxy_);
   bool with_snapshot = false;
   ObLSReplica new_replica;
-  uint64_t sql_tenant_id = get_private_table_exec_tenant_id(replica.get_tenant_id());
+  uint64_t sql_tenant_id = OB_SYS_TENANT_ID; // get_private_table_exec_tenant_id(replica.get_tenant_id());
   if (OB_UNLIKELY(!is_inited()) || OB_ISNULL(sql_proxy_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObPersistentLSTable not init", KR(ret), KP_(sql_proxy));
@@ -431,7 +431,7 @@ int ObPersistentLSTable::lock_lines_in_meta_table_for_leader_update_(
   ObLSInfo ls_info;
   const ObLSReplica *replica = NULL;
   const char *table_name_meta = OB_ALL_LS_META_TABLE_TNAME;
-  const uint64_t sql_tenant_id = get_private_table_exec_tenant_id(tenant_id);
+  const uint64_t sql_tenant_id = OB_SYS_TENANT_ID; // get_private_table_exec_tenant_id(tenant_id);
   if (OB_UNLIKELY(!is_inited())) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObPersistentLSTable not init", KR(ret));
@@ -496,7 +496,7 @@ int ObPersistentLSTable::set_role_(
   int64_t affected_rows = 0;
   char ip[OB_MAX_SERVER_ADDR_SIZE] = "";
   ObSqlString sql;
-  const uint64_t sql_tenant_id = get_private_table_exec_tenant_id(tenant_id);
+  const uint64_t sql_tenant_id = OB_SYS_TENANT_ID; // get_private_table_exec_tenant_id(tenant_id);
   if (OB_INVALID_TENANT_ID == tenant_id
     || !ls_id.is_valid()
     || !leader_server.is_valid()) {
@@ -535,7 +535,7 @@ int ObPersistentLSTable::update_replica_(
   const char *table_name = OB_ALL_LS_META_TABLE_TNAME;
   ObDMLSqlSplicer dml;
   int64_t affected_rows = 0;
-  const uint64_t sql_tenant_id = get_private_table_exec_tenant_id(replica.get_tenant_id());
+  const uint64_t sql_tenant_id = OB_SYS_TENANT_ID; // get_private_table_exec_tenant_id(replica.get_tenant_id());
   if (!replica.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid replica", KR(ret), K(replica));
@@ -630,7 +630,7 @@ int ObPersistentLSTable::get_by_tenant(
   } else {
     SMART_VAR(ObISQLClient::ReadResult, result) {
       ObSqlString sql;
-      const uint64_t sql_tenant_id = get_private_table_exec_tenant_id(tenant_id);
+      const uint64_t sql_tenant_id = OB_SYS_TENANT_ID; // get_private_table_exec_tenant_id(tenant_id);
       if (OB_FAIL(sql.assign_fmt(
           "SELECT * FROM %s WHERE tenant_id = %lu ORDER BY tenant_id, ls_id, svr_ip, svr_port",
           OB_ALL_LS_META_TABLE_TNAME, tenant_id))) {
@@ -754,7 +754,7 @@ int ObPersistentLSTable::remove(
   UNUSED(inner_table_only);
   char ip[OB_MAX_SERVER_ADDR_SIZE] = "";
   ObSqlString sql;
-  const uint64_t sql_tenant_id = get_private_table_exec_tenant_id(tenant_id);
+  const uint64_t sql_tenant_id = OB_SYS_TENANT_ID; // get_private_table_exec_tenant_id(tenant_id);
   int64_t affected_rows = 0;
   if (OB_UNLIKELY(!inited_) || OB_ISNULL(sql_proxy_)) {
     ret = OB_NOT_INIT;
@@ -793,7 +793,7 @@ int ObPersistentLSTable::remove_residual_ls(
   residual_count = 0;
   char ip[OB_MAX_SERVER_ADDR_SIZE] = "";
   ObSqlString sql;
-  const uint64_t sql_tenant_id = get_private_table_exec_tenant_id(tenant_id);
+  const uint64_t sql_tenant_id = OB_SYS_TENANT_ID; // get_private_table_exec_tenant_id(tenant_id);
   if (OB_UNLIKELY(!inited_) || OB_ISNULL(sql_proxy_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", KR(ret));
@@ -858,7 +858,7 @@ int ObPersistentLSTable::batch_get(
   if (FAILEDx(sql.append_fmt(") ORDER BY tenant_id, ls_id, svr_ip, svr_port"))) {
     LOG_WARN("appent fmt failed", KR(ret), K(tenant_id), K(ls_ids), K(sql));
   } else {
-    const uint64_t exec_tenant_id = get_private_table_exec_tenant_id(tenant_id);
+    const uint64_t exec_tenant_id = OB_SYS_TENANT_ID; // get_private_table_exec_tenant_id(tenant_id);
     SMART_VAR(ObISQLClient::ReadResult, result) {
       if (OB_FAIL(sql_proxy_->read(result, cluster_id, exec_tenant_id, sql.ptr()))) {
         LOG_WARN("execute sql failed", KR(ret), K(exec_tenant_id), K(sql));

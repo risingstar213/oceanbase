@@ -22655,6 +22655,37 @@ int ObDDLService::create_normal_tenant(
   int ret = OB_SUCCESS;
   ObSArray<ObTableSchema> tables;
   bool wait_for_sync = enable_meta_user_parallel_ && is_user_tenant(tenant_id);
+  bool generate_sync = enable_meta_user_parallel_ && is_meta_tenant(tenant_id);
+
+  if (true) {
+    ObDDLOperator ddl_operator(*schema_service_, *sql_proxy_);
+    ObDDLSQLTransaction trans(schema_service_, true, true, false, false);
+    const int64_t refreshed_schema_version = 0;
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(trans.start(sql_proxy_, OB_SYS_TENANT_ID, refreshed_schema_version))) {
+      LOG_WARN("fail to start trans", KR(ret), K(tenant_id));
+    } else if (OB_FAIL(ddl_operator.init_user_tenant_info(tenant_schema, sys_variable, tenant_role,
+                                                  recovery_until_scn, trans))) {
+      LOG_WARN("init tenant env failed", KR(ret), K(tenant_role), K(recovery_until_scn), K(tenant_schema));
+    }
+    if (trans.is_started()) {
+      int temp_ret = OB_SUCCESS;
+      bool commit = OB_SUCC(ret);
+      if (OB_SUCCESS != (temp_ret = trans.end(commit))) {
+        ret = (OB_SUCC(ret)) ? temp_ret : ret;
+        LOG_WARN("trans end failed", K(commit), K(temp_ret));
+      }
+    }
+  }
+
+  if (generate_sync) {
+    LOG_INFO("send sync signal");
+    ATOMIC_SET(&meta_user_parallel_sync_, true);
+  }
+  if (wait_for_sync) {
+    while (!meta_user_parallel_sync_);
+  }
+
   if (OB_FAIL(check_inner_stat())) {
     LOG_WARN("variable is not init", KR(ret));
   } else if (OB_UNLIKELY(!recovery_until_scn.is_valid_and_not_min())) {
@@ -22665,9 +22696,6 @@ int ObDDLService::create_normal_tenant(
     LOG_WARN("tenant_id is invalid", KR(ret), K(tenant_id));
   } else if (OB_FAIL(insert_restore_tenant_job(tenant_id, tenant_schema.get_tenant_name(), tenant_role))) {
     LOG_WARN("failed to insert restore tenant job", KR(ret), K(tenant_id), K(tenant_role), K(tenant_schema));
-  }
-  if (wait_for_sync) {
-    while (!meta_user_parallel_sync_);
   }
 
   if (OB_FAIL(ret)) {
@@ -23172,40 +23200,34 @@ int ObDDLService::init_tenant_schema(
     // 2. init tenant schema
     if (OB_SUCC(ret)) {
       // init schema first to avoid transactions
-      bool generate_sync = enable_meta_user_parallel_ && is_meta_tenant(tenant_id);
-      if (generate_sync) {
-        // if (OB_FAIL(parallel_create_schemas_user_dep(tenant_id, tables))) {
-        //   LOG_WARN("fail to create sys tables", KR(ret), K(tenant_id));
-        // }
-        ObDDLOperator ddl_operator(*schema_service_, *sql_proxy_);
-        ObDDLSQLTransaction trans(schema_service_, true, true, false, false);
-        const int64_t refreshed_schema_version = 0;
-        if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(trans.start(sql_proxy_, tenant_id, refreshed_schema_version))) {
-          LOG_WARN("fail to start trans", KR(ret), K(tenant_id));
-        } else if (OB_FAIL(ddl_operator.init_tenant_env(tenant_schema, sys_variable, tenant_role,
-                                                      recovery_until_scn, init_configs, trans))) {
-          LOG_WARN("init tenant env failed", KR(ret), K(tenant_role), K(recovery_until_scn), K(tenant_schema));
-        }
+      // if (true) {
+      //   ObDDLOperator ddl_operator(*schema_service_, *sql_proxy_);
+      //   ObDDLSQLTransaction trans(schema_service_, true, true, false, false);
+      //   const int64_t refreshed_schema_version = 0;
+      //   if (OB_FAIL(ret)) {
+      //   } else if (OB_FAIL(trans.start(sql_proxy_, OB_SYS_TENANT_ID, refreshed_schema_version))) {
+      //     LOG_WARN("fail to start trans", KR(ret), K(tenant_id));
+      //   } else if (OB_FAIL(ddl_operator.init_user_tenant_info(tenant_schema, sys_variable, tenant_role,
+      //                                                 recovery_until_scn, trans))) {
+      //     LOG_WARN("init tenant env failed", KR(ret), K(tenant_role), K(recovery_until_scn), K(tenant_schema));
+      //   }
+      //   if (trans.is_started()) {
+      //     int temp_ret = OB_SUCCESS;
+      //     bool commit = OB_SUCC(ret);
+      //     if (OB_SUCCESS != (temp_ret = trans.end(commit))) {
+      //       ret = (OB_SUCC(ret)) ? temp_ret : ret;
+      //       LOG_WARN("trans end failed", K(commit), K(temp_ret));
+      //     }
+      //   }
+      // }
 
-        if (trans.is_started()) {
-          int temp_ret = OB_SUCCESS;
-          bool commit = OB_SUCC(ret);
-          if (OB_SUCCESS != (temp_ret = trans.end(commit))) {
-            ret = (OB_SUCC(ret)) ? temp_ret : ret;
-            LOG_WARN("trans end failed", K(commit), K(temp_ret));
-          }
-        }
-
-        LOG_INFO("send sync signal");
-        ATOMIC_SET(&meta_user_parallel_sync_, true);
-        
-        if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(parallel_create_schemas_check_correlartion(tenant_id, tables))) {
-          LOG_WARN("fail to create sys tables", KR(ret), K(tenant_id));
-        }
-
-      } else if (OB_FAIL(parallel_create_schemas_check_correlartion(tenant_id, tables))) {
+      // bool generate_sync = enable_meta_user_parallel_ && is_meta_tenant(tenant_id);
+      // if (generate_sync) {
+      //   LOG_INFO("send sync signal");
+      //   ATOMIC_SET(&meta_user_parallel_sync_, true);
+      // } 
+      
+      if (OB_FAIL(parallel_create_schemas_check_correlartion(tenant_id, tables))) {
         LOG_WARN("fail to create sys tables", KR(ret), K(tenant_id));
       }
       ObDDLOperator ddl_operator(*schema_service_, *sql_proxy_);
@@ -23226,7 +23248,7 @@ int ObDDLService::init_tenant_schema(
       } else if (OB_FAIL(ddl_operator.replace_sys_variable(
                  sys_variable, new_schema_version, trans, OB_DDL_ALTER_SYS_VAR))) {
         LOG_WARN("fail to replace sys variable", KR(ret), K(sys_variable));
-      } else if (!generate_sync && OB_FAIL(ddl_operator.init_tenant_env(tenant_schema, sys_variable, tenant_role,
+      } else if (OB_FAIL(ddl_operator.init_tenant_env(tenant_schema, sys_variable, tenant_role,
                                                       recovery_until_scn, init_configs, trans))) {
         LOG_WARN("init tenant env failed", KR(ret), K(tenant_role), K(recovery_until_scn), K(tenant_schema));
       } else if (OB_FAIL(ddl_operator.insert_tenant_merge_info(OB_DDL_ADD_TENANT_START, tenant_schema, trans))) {
