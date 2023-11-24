@@ -321,7 +321,7 @@ int ObLSTableUpdater::batch_process_tasks(
     } else {
       // Make sure the superior tenant which stores meta table has not been dropped and it's schema is ready.
       // User tenant's superior tenant is meta; Meta tenant's superior tenant is sys; Sys tenant manages itself.
-      superior_tenant_id = get_private_table_exec_tenant_id(tenant_id);
+      superior_tenant_id = OB_SYS_TENANT_ID; // get_private_table_exec_tenant_id(tenant_id);
       (void)check_tenant_status_(superior_tenant_id, tenant_dropped, schema_not_ready); // ignore ret code
     }
     if (OB_SUCC(ret) && !tenant_dropped) {

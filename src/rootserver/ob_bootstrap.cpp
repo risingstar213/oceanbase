@@ -1116,7 +1116,7 @@ int ObBootstrap::add_servers_in_rs_list(rootserver::ObServerZoneOpService &serve
 int ObBootstrap::wait_all_rs_in_service()
 {
   int ret = OB_SUCCESS;
-  const int64_t check_interval = 200 * 1000;
+  const int64_t check_interval = 100 * 1000;
   int64_t left_time_can_sleep = WAIT_RS_IN_SERVICE_TIMEOUT_US;
   if (OB_FAIL(check_inner_stat())) {
     LOG_WARN("check_inner_stat failed", K(ret));
