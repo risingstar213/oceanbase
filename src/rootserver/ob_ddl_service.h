@@ -2029,6 +2029,7 @@ private:
       const common::ObIArray<share::ObResourcePoolName> &pool_list,
       const bool create_ls_with_palf,
       const palf::PalfBaseInfo &palf_base_info);
+  int create_tenant_sys_ls_wait_leader(int tenant_id);
   int create_tenant_user_ls(const uint64_t tenant_id);
   int broadcast_sys_table_schemas(
       const uint64_t tenant_id,

@@ -143,6 +143,7 @@ if __name__ == "__main__":
         _logger.info('checkout server status ok')
         # ObRootService::check_config_result
 
+        create_begin = datetime.datetime.now()
         __create_tenant(cursor,
                         cpu=args.tenant_cpu,
                         memory_size=args.tenant_memory,
@@ -150,6 +151,8 @@ if __name__ == "__main__":
                         resource_pool_name=args.tenant_resource_pool_name,
                         zone_name=args.zone,
                         tenant_name=args.tenant_name)
+        create_end = datetime.datetime.now()
+        _logger.info('create success: %s ms' % ((create_end - create_begin).total_seconds() * 1000))
         _logger.info('create tenant done')
 
     except mysql.err.Error as e:

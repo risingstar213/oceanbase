@@ -22018,21 +22018,6 @@ int ObDDLService::create_tenant(
 
       int th_ret1; int th_ret2;
       ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
-      std::thread th1([&]() {
-        // DEBUG_SYNC(BEFORE_CREATE_META_TENANT);
-        int ret = OB_SUCCESS;
-        set_thread_name("create_tenant_meta");
-        ObCurTraceId::set(*cur_trace_id);
-
-        if (OB_FAIL(create_normal_tenant(meta_tenant_id, pools, meta_tenant_schema, tenant_role,
-          recovery_until_scn, meta_sys_variable, false/*create_ls_with_palf*/, meta_palf_base_info, init_configs,
-          arg.is_creating_standby_, arg.log_restore_source_))) {
-          LOG_WARN("fail to create meta tenant", KR(ret), K(meta_tenant_id), K(pools), K(meta_sys_variable),
-              K(tenant_role), K(recovery_until_scn), K(meta_palf_base_info), K(init_configs));
-        }
-
-        ATOMIC_SET(&th_ret1, ret);
-      });
 
       std::thread th2([&]() {
         int ret = OB_SUCCESS;
@@ -22049,6 +22034,22 @@ int ObDDLService::create_tenant(
 
         ATOMIC_SET(&th_ret2, ret);
       });
+
+      std::thread th1([&]() {
+        int ret = OB_SUCCESS;
+        set_thread_name("create_tenant_meta");
+        ObCurTraceId::set(*cur_trace_id);
+
+        if (OB_FAIL(create_normal_tenant(meta_tenant_id, pools, meta_tenant_schema, tenant_role,
+          recovery_until_scn, meta_sys_variable, false/*create_ls_with_palf*/, meta_palf_base_info, init_configs,
+          arg.is_creating_standby_, arg.log_restore_source_))) {
+          LOG_WARN("fail to create meta tenant", KR(ret), K(meta_tenant_id), K(pools), K(meta_sys_variable),
+              K(tenant_role), K(recovery_until_scn), K(meta_palf_base_info), K(init_configs));
+        }
+
+        ATOMIC_SET(&th_ret1, ret);
+      });
+
 
       th1.join(); th2.join();
       if (OB_SUCC(ret)) {
@@ -22664,8 +22665,6 @@ int ObDDLService::create_normal_tenant(
     LOG_WARN("tenant_id is invalid", KR(ret), K(tenant_id));
   } else if (OB_FAIL(insert_restore_tenant_job(tenant_id, tenant_schema.get_tenant_name(), tenant_role))) {
     LOG_WARN("failed to insert restore tenant job", KR(ret), K(tenant_id), K(tenant_role), K(tenant_schema));
-  } else if (OB_FAIL(ObSchemaUtils::construct_inner_table_schemas(tenant_id, tables))) {
-    LOG_WARN("fail to get inner table schemas in tenant space", KR(ret), K(tenant_id));
   }
   if (wait_for_sync) {
     while (!meta_user_parallel_sync_);
@@ -22677,11 +22676,8 @@ int ObDDLService::create_normal_tenant(
     LOG_WARN("fail to create tenant sys log stream", KR(ret), K(tenant_schema), K(pool_list), K(palf_base_info));
   } else if (is_user_tenant(tenant_id) && !tenant_role.is_primary()) {
     //standby cluster no need create sys tablet and init tenant schema
-  // } else if (OB_FAIL(ObSchemaUtils::construct_inner_table_schemas(tenant_id, tables))) {
-  //   LOG_WARN("fail to get inner table schemas in tenant space", KR(ret), K(tenant_id));
-  } else if (OB_FAIL(broadcast_sys_table_schemas(tenant_id, tables))) {
-    // 0.2s
-    LOG_WARN("fail to broadcast sys table schemas", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(ObSchemaUtils::construct_inner_table_schemas(tenant_id, tables))) {
+    LOG_WARN("fail to get inner table schemas in tenant space", KR(ret), K(tenant_id));
   } else if (OB_FAIL(create_tenant_sys_tablets(tenant_id, tables))) {
     // 0.5s
     LOG_WARN("fail to create tenant partitions", KR(ret), K(tenant_id));
@@ -22814,17 +22810,17 @@ int ObDDLService::create_tenant_sys_ls(
       LOG_WARN("fail to create tenant sys ls", KR(ret), K(pool_list), K(palf_base_info),
                K(locality), K(paxos_replica_num), K(tenant_schema), K(zone_priority));
     } else {
-      share::ObLSLeaderElectionWaiter ls_leader_waiter(*lst_operator_, stopped_);
-      int64_t timeout = GCONF.rpc_timeout;
-      if (INT64_MAX != THIS_WORKER.get_timeout_ts()) {
-        timeout = max(timeout, THIS_WORKER.get_timeout_remain());
-      }
-      int64_t wait_leader_start = ObTimeUtility::current_time();
-      if (OB_FAIL(ls_leader_waiter.wait(tenant_id, SYS_LS, timeout))) {
-        LOG_WARN("fail to wait election leader", KR(ret), K(tenant_id), K(SYS_LS), K(timeout));
-      }
-      int64_t wait_leader_end = ObTimeUtility::current_time();
-      wait_leader = wait_leader_end - wait_leader_end;
+      // share::ObLSLeaderElectionWaiter ls_leader_waiter(*lst_operator_, stopped_);
+      // int64_t timeout = GCONF.rpc_timeout;
+      // if (INT64_MAX != THIS_WORKER.get_timeout_ts()) {
+      //   timeout = max(timeout, THIS_WORKER.get_timeout_remain());
+      // }
+      // int64_t wait_leader_start = ObTimeUtility::current_time();
+      // if (OB_FAIL(ls_leader_waiter.wait(tenant_id, SYS_LS, timeout))) {
+      //   LOG_WARN("fail to wait election leader", KR(ret), K(tenant_id), K(SYS_LS), K(timeout));
+      // }
+      // int64_t wait_leader_end = ObTimeUtility::current_time();
+      // wait_leader = wait_leader_end - wait_leader_end;
     }
   }
   if (is_meta_tenant(tenant_id)) {
@@ -22834,6 +22830,25 @@ int ObDDLService::create_tenant_sys_ls(
   }
   LOG_INFO("[CREATE_TENANT] STEP 2.1. finish create sys log stream", KR(ret), K(tenant_schema),
            "cost", ObTimeUtility::fast_current_time() - start_time, "wait leader", wait_leader);
+  return ret;
+}
+
+int ObDDLService::create_tenant_sys_ls_wait_leader(int tenant_id)
+{
+  int ret = OB_SUCCESS;
+  int64_t wait_leader = 0;
+  share::ObLSLeaderElectionWaiter ls_leader_waiter(*lst_operator_, stopped_);
+  int64_t timeout = GCONF.rpc_timeout;
+  if (INT64_MAX != THIS_WORKER.get_timeout_ts()) {
+    timeout = max(timeout, THIS_WORKER.get_timeout_remain());
+  }
+  int64_t wait_leader_start = ObTimeUtility::current_time();
+  if (OB_FAIL(ls_leader_waiter.wait(tenant_id, SYS_LS, timeout))) {
+    LOG_WARN("fail to wait election leader", KR(ret), K(tenant_id), K(SYS_LS), K(timeout));
+  }
+  int64_t wait_leader_end = ObTimeUtility::current_time();
+  wait_leader = wait_leader_end - wait_leader_end;
+  LOG_INFO("create_tenant_wait_sys_ls", "wait leader", wait_leader);
   return ret;
 }
 
@@ -23042,6 +23057,13 @@ int ObDDLService::create_tenant_sys_tablets(
         }
       }
     } // end for
+    create_tenant_sys_ls_wait_leader(tenant_id);
+
+    if (OB_FAIL(broadcast_sys_table_schemas(tenant_id, tables))) {
+     // 0.2s
+     LOG_WARN("fail to broadcast sys table schemas", KR(ret), K(tenant_id));
+    }
+    LOG_INFO("start table create execute");
     if (FAILEDx(table_creator.execute())) {
       LOG_WARN("fail to execute creator", KR(ret), K(tenant_id));
     } else {
@@ -23152,9 +23174,9 @@ int ObDDLService::init_tenant_schema(
       // init schema first to avoid transactions
       bool generate_sync = enable_meta_user_parallel_ && is_meta_tenant(tenant_id);
       if (generate_sync) {
-        if (OB_FAIL(parallel_create_schemas_user_dep(tenant_id, tables))) {
-          LOG_WARN("fail to create sys tables", KR(ret), K(tenant_id));
-        }
+        // if (OB_FAIL(parallel_create_schemas_user_dep(tenant_id, tables))) {
+        //   LOG_WARN("fail to create sys tables", KR(ret), K(tenant_id));
+        // }
         ObDDLOperator ddl_operator(*schema_service_, *sql_proxy_);
         ObDDLSQLTransaction trans(schema_service_, true, true, false, false);
         const int64_t refreshed_schema_version = 0;
@@ -23179,7 +23201,7 @@ int ObDDLService::init_tenant_schema(
         ATOMIC_SET(&meta_user_parallel_sync_, true);
         
         if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(parallel_create_schemas_check_correlartion_without_dep(tenant_id, tables))) {
+        } else if (OB_FAIL(parallel_create_schemas_check_correlartion(tenant_id, tables))) {
           LOG_WARN("fail to create sys tables", KR(ret), K(tenant_id));
         }
 
