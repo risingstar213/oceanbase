@@ -40,7 +40,7 @@ ObRatelimitMgr::ObRatelimitMgr()
   thread_cnt_ = THREAD_COUNT;
   pending_rpc_count_ = 0;
   waiting_rpc_rsp_ = 0;
-  stat_period_ = 1000 * 1000; // 1s by default
+  stat_period_ = 200 * 1000; // 1s by default
 }
 
 ObRatelimitMgr::~ObRatelimitMgr()

@@ -1248,7 +1248,7 @@ DEF_BOOL(_enable_easy_keepalive, OB_CLUSTER_PARAMETER, "True",
 DEF_BOOL(enable_ob_ratelimit, OB_CLUSTER_PARAMETER, "False",
          "enable ratelimit between regions for RPC connection.",
          ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
-DEF_TIME(ob_ratelimit_stat_period, OB_CLUSTER_PARAMETER, "1s", "[100ms,]",
+DEF_TIME(ob_ratelimit_stat_period, OB_CLUSTER_PARAMETER, "200ms", "[100ms,]",
          "the time interval to update observer's maximum bandwidth to a certain region. ",
          ObParameterAttr(Section::OBSERVER, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
 DEF_INT(open_cursors, OB_TENANT_PARAMETER, "50", "[0,65535]",

@@ -1104,6 +1104,7 @@ void ObSqlNio::run(int64_t idx)
     // if (tenant_id_ != common::OB_INVALID_ID) {
     //   obmysql::sql_nio_add_cgroup(tenant_id_);
     // }
+    LOG_INFO("ObSqlNio start to run");
     while(!has_set_stop() && !(OB_NOT_NULL(&lib::Thread::current()) ? lib::Thread::current().has_set_stop() : false)) {
       impl_[idx].do_work();
     }
