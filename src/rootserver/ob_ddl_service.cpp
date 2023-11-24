@@ -23400,8 +23400,8 @@ int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTable
     int64_t refreshed_schema_version = 0;
     if (OB_FAIL(trans.start(sql_proxy_, tenant_id, refreshed_schema_version))) {
       LOG_WARN("start transaction failed", KR(ret));
-    } else if (OB_FAIL(trans.enable_async(sql_proxy_, tenant_id))) {
-      LOG_WARN("enable async failed", KR(ret));
+    // } else if (OB_FAIL(trans.enable_async(sql_proxy_, tenant_id))) {
+    //   LOG_WARN("enable async failed", KR(ret));
     } else {
       for (int64_t idx = begin;idx < end && OB_SUCC(ret); idx++) {
         ObTableSchema &table = *table_schemas.at(idx);
@@ -23493,7 +23493,10 @@ void ob_pthread_join(void *ptr);
 // 如果没有相关性，可以直接以 batch 为单位并行
 int ObDDLService::parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas)
 {
-  const int THREAD_NUM = 4;
+  int THREAD_NUM = 8;
+  if (is_sys_tenant(tenant_id)) {
+    THREAD_NUM = 16;
+  }
   
   int ret = OB_SUCCESS;
   int64_t begin = 0;
