@@ -591,6 +591,8 @@ int ObBootstrap::execute_bootstrap(rootserver::ObServerZoneOpService &server_zon
   }
   BOOTSTRAP_CHECK_SUCCESS_V2("refresh_schema");
 
+  omt::ObTenantNodeBalancer::get_instance().process_one_round();
+
   if (FAILEDx(add_servers_in_rs_list(server_zone_op_service))) {
     LOG_WARN("fail to add servers in rs_list_", KR(ret));
   } else if (OB_FAIL(wait_all_rs_in_service())) {

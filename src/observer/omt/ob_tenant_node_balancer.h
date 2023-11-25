@@ -73,6 +73,8 @@ public:
 
   virtual void run1();
 
+  int process_one_round();
+
 private:
   static const int64_t RECYCLE_LATENCY = 180L * 1000L * 1000L;
   ObTenantNodeBalancer();

@@ -136,6 +136,60 @@ void ObTenantNodeBalancer::run1()
   }
 }
 
+int ObTenantNodeBalancer::process_one_round()
+{
+  int ret;
+  TenantUnits units;
+  int64_t sys_unit_cnt = 0;
+  ObCurTraceId::init(GCONF.self_addr_);
+  if (!ObServerCheckpointSlogHandler::get_instance().is_started()) {
+    // do nothing if not finish replaying slog
+    LOG_INFO("server slog not finish replaying, need wait");
+    ret = OB_NEED_RETRY;
+  } else if (OB_FAIL(unit_getter_.get_sys_unit_count(sys_unit_cnt))) {
+    LOG_WARN("get sys unit count fail", KR(ret));
+  } else if (sys_unit_cnt <= 0) {
+    // check wether sys tenant has been created, do nothing if sys tenant has not been created
+    LOG_INFO("sys tenant has not been created, tenant node balancer can not run, need wait",
+        K(sys_unit_cnt));
+    ret = OB_NEED_RETRY;
+  } else if (OB_FAIL(unit_getter_.get_server_tenant_configs(myaddr_, units))) {
+    LOG_WARN("get server tenant units fail", K(myaddr_), K(ret));
+  } else if (OB_FAIL(refresh_tenant(units))) {
+    LOG_WARN("failed to refresh tenant", K(ret), K(units));
+  } else if (FALSE_IT(periodically_check_tenant())) {
+    // never reach here
+  }
+
+  FLOG_INFO("refresh tenant units", K(sys_unit_cnt), K(units), KR(ret));
+
+  // will try to update tma whether tenant unit is changed or not,
+  // because memstore_limit_percentage may be changed
+  int tmp_ret = OB_SUCCESS;
+  if (OB_SUCCESS != (tmp_ret = TMA_MGR_INSTANCE.update_tenant_mem_limit(units))) {
+    LOG_WARN("TMA_MGR_INSTANCE.update_tenant_mem_limit failed", K(tmp_ret));
+  }
+
+  // check whether tenant unit is changed, try to update unit config of tenant
+  ObSEArray<uint64_t, 10> tenants;
+  if (!ObServerCheckpointSlogHandler::get_instance().is_started()) {
+    // do nothing if not finish replaying slog
+    LOG_INFO("server slog not finish replaying, need wait");
+    ret = OB_NEED_RETRY;
+  } else if (OB_FAIL(unit_getter_.get_tenants(tenants))) {
+    LOG_WARN("get cluster tenants fail", K(ret));
+  } else if (OB_FAIL(OTC_MGR.refresh_tenants(tenants))) {
+    LOG_WARN("fail refresh tenant config", K(tenants), K(ret));
+  }
+  if (OB_SUCCESS != (tmp_ret = GCTX.log_block_mgr_->try_resize())) {
+    LOG_WARN("ObServerLogBlockMgr try_resize failed", K(tmp_ret));
+  }
+
+  FLOG_INFO("refresh tenant config", K(tenants), K(ret));
+
+  return ret;
+}
+
 int ObTenantNodeBalancer::notify_create_tenant(const obrpc::TenantServerUnitConfig &unit)
 {
   LOG_INFO("succ to receive notify of creating tenant", K(unit));
