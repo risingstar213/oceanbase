@@ -23539,6 +23539,7 @@ int ObDDLService::parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSc
   int64_t finish_cnt = 0;
 
   LOG_INFO("parallel_create_schemas start", "count", table_schemas.count());
+  int64_t start_ts = ObTimeUtility::fast_current_time();
 
   if (table_schemas.count() < 50) {
     return batch_create_schema_local(tenant_id, table_schemas, 0, table_schemas.count());
@@ -23583,6 +23584,8 @@ int ObDDLService::parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSc
   if (finish_cnt != table_schemas.count()) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("parallel_create_table_schema fail", K(finish_cnt), K(table_schemas.count()), K(ret), K(tenant_id));
+  } else {
+    LOG_INFO("parallel_create_schemas end", "count", table_schemas.count(), "time", ObTimeUtility::fast_current_time() - start_ts);
   }
   return ret;
 }
@@ -23602,20 +23605,17 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   std::unordered_set<uint64_t> tmp_ids;
   for (int i = 0; i < table_schemas.count(); i++) {
     ObTableSchema &table = table_schemas.at(i);
-    bool has_dep = 
-      (table.is_index_table() || table.is_materialized_view() || table.is_aux_vp_table() || table.is_aux_lob_table()) &&
-      !(ObSysTableChecker::is_sys_table_index_tid(table.get_table_id()) || is_sys_lob_table(table.get_table_id()));
-    if (has_dep && (table_ids.count(table.get_data_table_id()) == 0)) {
-      flag = false;
-      next_round_tables.push_back(&table);
-    } else {
+    if (is_core_table(table.get_table_id())) {
       tmp_ids.insert(table.get_table_id());
       this_round_tables.push_back(&table);
+    } else {
+      tmp_ids.insert(table.get_table_id());
+      next_round_tables.push_back(&table);
     }
   }
   table_ids.insert(tmp_ids.begin(), tmp_ids.end());
-
-  if (OB_FAIL(parallel_create_schemas(tenant_id, this_round_tables))) {
+  // core table
+  if (OB_FAIL(batch_create_schema_local(tenant_id, this_round_tables, 0, this_round_tables.count()))) {
     LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
     return ret;
   }
