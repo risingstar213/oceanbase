@@ -105,6 +105,7 @@ private:
 };
 
 ElectionAcceptor::ElectionAcceptor(ElectionImpl *p_election) :
+lock_(ObLatchIds::DEFAULT_MUTEX),
 ballot_number_(INVALID_VALUE),
 ballot_of_time_window_(INVALID_VALUE),
 is_time_window_opened_(false),
@@ -129,18 +130,16 @@ void ElectionAcceptor::advance_ballot_number_and_reset_related_states_(const int
 
 int ElectionAcceptor::start()
 {
-  ObAddr last_record_lease_owner;
-  bool last_record_lease_valid_state = false;
+  // ObAddr last_record_lease_owner;
+  // bool last_record_lease_valid_state = false;
   int ret = OB_SUCCESS;
   return p_election_->timer_->schedule_task_repeat(time_window_task_handle_,
                                                    250_ms,
-                                                   [this,
-                                                    last_record_lease_owner,
-                                                    last_record_lease_valid_state]() mutable {
+                                                   [this]() mutable {
     ELECT_TIME_GUARD(500_ms);
     #define PRINT_WRAPPER KR(ret), K(*this)
     int ret = OB_SUCCESS;
-    
+
     LockGuard lock_guard(p_election_->lock_);
     // 周期性打印选举的状态
     if (ObClockGenerator::getCurrentTime() > last_dump_acceptor_info_ts_ + 3_s) {
@@ -149,7 +148,7 @@ int ElectionAcceptor::start()
     }
     // 当acceptor的Lease有效状态发生变化时需要打印日志以及汇报事件
     bool lease_valid_state = !lease_.is_expired();
-    if (last_record_lease_valid_state != lease_valid_state) {// 当记录的lease有效状态与当前Lease的有效状态不符时
+    if (this->last_record_lease_valid_state_ != lease_valid_state) {// 当记录的lease有效状态与当前Lease的有效状态不符时
       if (lease_valid_state) {// Lease从无效变有效，意味着该acceptor【可能】见证了一个新的Leader诞生
         LOG_ELECT_LEADER(INFO, "witness new leader");
       } else {// Lease从有效变无效，意味着本副本可能与Leader失去了网络连接
@@ -159,25 +158,25 @@ int ElectionAcceptor::start()
       }
     }
     // 当acceptor发现Lease的owner发生变化的时候需要打印日志以及汇报事件
-    if (last_record_lease_owner != lease_.get_owner()) {
-      if (last_record_lease_owner.is_valid() && lease_.get_owner().is_valid()) {
+    if (this->last_record_lease_owner_ != lease_.get_owner()) {
+      if (this->last_record_lease_owner_.is_valid() && lease_.get_owner().is_valid()) {
         LOG_CHANGE_LEADER(INFO, "lease owner changed");
-        p_election_->event_recorder_.report_acceptor_witness_change_leader_event(last_record_lease_owner, lease_.get_owner());
+        p_election_->event_recorder_.report_acceptor_witness_change_leader_event(this->last_record_lease_owner_, lease_.get_owner());
       }
-      last_record_lease_owner = lease_.get_owner();
+      this->last_record_lease_owner_ = lease_.get_owner();
     }
     if (is_time_window_opened_) {
       ElectionPrepareResponseMsg prepare_res_accept(p_election_->get_self_addr(),
                                                     p_election_->get_ls_biggest_min_cluster_version_ever_seen_(),
                                                     highest_priority_prepare_req_);
       bool can_vote = false;
-      if (last_record_lease_valid_state && !lease_valid_state) {// 这个定时任务可能是被延迟致lease到期时触发的，为了在lease到期的第一时间投票
+      if (this->last_record_lease_valid_state_ && !lease_valid_state) {// 这个定时任务可能是被延迟致lease到期时触发的，为了在lease到期的第一时间投票
         can_vote = true;
         LOG_ELECT_LEADER(INFO, "vote when lease expired");
       } else if (ObClockGenerator::getCurrentTime() - last_time_window_open_ts_ >= CALCULATE_TIME_WINDOW_SPAN_TS()) {
         can_vote = true;
       } else {
-        LOG_ELECT_LEADER(INFO, "can't vote now", K(last_record_lease_valid_state),
+        LOG_ELECT_LEADER(INFO, "can't vote now", K(this->last_record_lease_valid_state_),
                          K(lease_valid_state), K(CALCULATE_TIME_WINDOW_SPAN_TS()),
                          KTIME_(last_time_window_open_ts));
       }
@@ -205,7 +204,7 @@ int ElectionAcceptor::start()
         is_time_window_opened_ = false;// 发出消息后，关闭时间窗口
       }
     }
-    last_record_lease_valid_state = lease_valid_state;
+    this->last_record_lease_valid_state_ = lease_valid_state;
     #undef PRINT_WRAPPER
     return false;
   });
@@ -234,9 +233,9 @@ void ElectionAcceptor::on_prepare_request(const ElectionPrepareRequestMsg &prepa
 {
   ELECT_TIME_GUARD(500_ms);
   #define PRINT_WRAPPER KR(ret), K(prepare_req), K(*this)
-  if (!p_election_->is_single_node_) {
-    CHECK_SILENCE();// 启动后的要维持一段静默时间，acceptor假装看不到任何消息，以维护lease的正确语义
-  }
+  // if (!p_election_->is_single_node_) {
+  //   CHECK_SILENCE();// 启动后的要维持一段静默时间，acceptor假装看不到任何消息，以维护lease的正确语义
+  // }
   int ret = OB_SUCCESS;
   LogPhase phase = (prepare_req.get_role() == common::ObRole::FOLLOWER ? LogPhase::ELECT_LEADER : LogPhase::RENEW_LEASE);
   LOG_PHASE(INFO, phase, "handle prepare request");
@@ -315,14 +314,115 @@ void ElectionAcceptor::on_prepare_request(const ElectionPrepareRequestMsg &prepa
   #undef PRINT_WRAPPER
 }
 
+void ElectionAcceptor::single_node_election_on_prepare_request(const ElectionPrepareRequestMsg &prepare_req)
+{
+  
+  ELECT_TIME_GUARD(500_ms);
+
+  // LockGuard lock_guard(p_election_->lock_);
+  #define PRINT_WRAPPER KR(ret), K(prepare_req), K(*this)
+
+  int ret = OB_SUCCESS;
+  LogPhase phase = LogPhase::ELECT_LEADER;
+  LOG_PHASE(INFO, phase, "handle prepare request");
+  if (OB_UNLIKELY(false == p_election_->is_member_list_valid_())) {
+    LOG_PHASE(INFO, phase, "ignore prepare when member_list is invalid");
+  } else if (prepare_req.get_membership_version() < p_election_->get_membership_version_()) {
+    LOG_PHASE(INFO, phase, "ignore lower membership version request");
+  } else if (OB_LIKELY(RequestChecker::check_ballot_valid(prepare_req, this, phase))) {
+    // 0. 收到leader prepare的时候无须比较优先级，直接返回投票结果
+    // 1. 遇到比时间窗口更大的ballot number的时候需要关闭当前的时间窗口
+    // 2. 若时间窗口未开启，需要开启时间窗口
+    ballot_of_time_window_ = prepare_req.get_ballot_number();
+    highest_priority_prepare_req_.reset();
+    last_time_window_open_ts_ = ObClockGenerator::getCurrentTime();
+    // 3. 成员版本号是第一优先级，在成员版本号不小于自己的基础上要比较成员版本号的大小，否则将导致分票
+    if (OB_SUCC(ret)) {// 在时间窗口内，进行计票
+      if (prepare_req.get_ballot_number() != ballot_of_time_window_) {
+        LOG_PHASE(INFO, phase, "prepare request's ballot is not same as time window, just ignore");
+      } else if (!highest_priority_prepare_req_.is_valid()) {
+        highest_priority_prepare_req_ = prepare_req;
+        LOG_PHASE(INFO, phase, "highest priority prepare message will be replaced casuse cached highest prioriy message is invalid");
+        vote_reason_.assign("the only request");
+      } else if (prepare_req.get_membership_version() > highest_priority_prepare_req_.get_membership_version()) {
+        highest_priority_prepare_req_ = prepare_req;
+        LOG_PHASE(INFO, phase, "highest priority prepare message will be replaced casuse new message's membership version is higher");
+        vote_reason_.assign("membership_version is higher");
+      } else if (prepare_req.get_membership_version() < highest_priority_prepare_req_.get_membership_version()) {
+        LOG_PHASE(INFO, phase, "prepare message's membership version not less than self, but not greater than cached highest priority prepare message");
+      } else {
+        // 4. 比较消息和缓存的最高优先级之间的高低
+        if (p_election_->is_rhs_message_higher_(highest_priority_prepare_req_, prepare_req, vote_reason_, true, LogPhase::ELECT_LEADER)) {
+          LOG_PHASE(INFO, phase, "highest priority prepare request will be replaced", K(vote_reason_));
+          highest_priority_prepare_req_ = prepare_req;
+        } else {
+          LOG_PHASE(INFO, phase, "ignore prepare request, cause it has lower priority", K(vote_reason_));
+        }
+      }
+    }
+  }
+
+  // 当acceptor的Lease有效状态发生变化时需要打印日志以及汇报事件
+  bool lease_valid_state = !lease_.is_expired();
+  if (this->last_record_lease_valid_state_ != lease_valid_state) {// 当记录的lease有效状态与当前Lease的有效状态不符时
+    if (lease_valid_state) {// Lease从无效变有效，意味着该acceptor【可能】见证了一个新的Leader诞生
+      LOG_ELECT_LEADER(INFO, "witness new leader");
+    } else {// Lease从有效变无效，意味着本副本可能与Leader失去了网络连接
+      LOG_RENEW_LEASE(WARN, "lease expired");
+      p_election_->event_recorder_.report_acceptor_lease_expired_event(lease_);
+      lease_.reset();
+    }
+  }
+  // 当acceptor发现Lease的owner发生变化的时候需要打印日志以及汇报事件
+  if (this->last_record_lease_owner_ != lease_.get_owner()) {
+    if (this->last_record_lease_owner_.is_valid() && lease_.get_owner().is_valid()) {
+      LOG_CHANGE_LEADER(INFO, "lease owner changed");
+      p_election_->event_recorder_.report_acceptor_witness_change_leader_event(this->last_record_lease_owner_, lease_.get_owner());
+    }
+    this->last_record_lease_owner_ = lease_.get_owner();
+  }
+
+  // vote
+  ElectionPrepareResponseMsg prepare_res_accept(p_election_->get_self_addr(),
+                                    p_election_->get_ls_biggest_min_cluster_version_ever_seen_(),
+                                    highest_priority_prepare_req_);
+
+
+  if (ballot_of_time_window_ == highest_priority_prepare_req_.get_ballot_number() &&
+      ballot_of_time_window_ > ballot_number_) {
+    // 1.1 要投票了，可以推大ballot number了
+    ballot_number_ = ballot_of_time_window_;
+    // 1.2 若lease过期需要重置lease，因为proposer没办法判断lease的有效性
+    if (lease_.is_expired()) {// 若Lease过期，则返回空Lease（Lease是否过期只能在本机上进行判断）
+      lease_.reset();
+    }
+    // 1.3 构造prepare ok消息
+    prepare_res_accept.set_accepted(ballot_number_, lease_);
+    if (CLICK_FAIL(p_election_->send_(prepare_res_accept))) {
+      LOG_ELECT_LEADER(ERROR, "fail to send prepare ok", K(prepare_res_accept));
+    } else {
+      p_election_->event_recorder_.report_vote_event(prepare_res_accept.get_receiver(), vote_reason_);
+      LOG_ELECT_LEADER(INFO, "time window closed, send vote", K(prepare_res_accept));
+    }
+  } else {
+    LOG_ELECT_LEADER(ERROR, "give up sending prepare response, casuse ballot number not match", K(prepare_res_accept));
+  }
+
+  last_record_lease_valid_state_ = lease_valid_state;
+  
+  #undef PRINT_WRAPPER
+
+  return;
+}
+
 void ElectionAcceptor::on_accept_request(const ElectionAcceptRequestMsg &accept_req,
                                          int64_t *us_to_expired)
 {
   ELECT_TIME_GUARD(500_ms);
   #define PRINT_WRAPPER KR(ret), K(accept_req), K(*this)
- if (!p_election_->is_single_node_) {
-    CHECK_SILENCE();// 启动后的要维持一段静默时间，acceptor假装看不到任何消息，以维护lease的正确语义
-  }
+//  if (!p_election_->is_single_node_) {
+//     CHECK_SILENCE();// 启动后的要维持一段静默时间，acceptor假装看不到任何消息，以维护lease的正确语义
+//   }
   int ret = OB_SUCCESS;
   if (OB_LIKELY(RequestChecker::check_ballot_valid(accept_req,
                                                    this,

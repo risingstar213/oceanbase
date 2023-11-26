@@ -84,11 +84,11 @@ ElectionImpl::~ElectionImpl()
 void ElectionImpl::set_single_node(bool is_single)
 {
   is_single_node_ = is_single;
-  if (is_single) {
-    MAX_TST = 50_ms;
-  } else {
-    MAX_TST = 1_s;
-  }
+  // if (is_single) {
+  //   MAX_TST = 50_ms;
+  // } else {
+  //   MAX_TST = 1_s;
+  // }
 }
 
 int ElectionImpl::init_and_start(const int64_t id,
@@ -242,7 +242,11 @@ int ElectionImpl::handle_message(const ElectionPrepareRequestMsg &msg)
     if (msg.get_sender() != self_addr_) {
       proposer_.on_prepare_request(msg, &need_register_devote_task);
     }
-    acceptor_.on_prepare_request(msg);
+    if (is_single_node_) {
+      acceptor_.single_node_election_on_prepare_request(msg);
+    } else {
+      acceptor_.on_prepare_request(msg);
+    }
   }
   if (need_register_devote_task) {
     if (CLICK_FAIL(proposer_.reschedule_or_register_prepare_task_after_(CALCULATE_MAX_ELECT_COST_TIME()))) {
@@ -270,6 +274,10 @@ int ElectionImpl::handle_message(const ElectionAcceptRequestMsg &msg)
                                                                 "receive bigger accept request");
     }
     acceptor_.on_accept_request(msg, &us_to_expired);
+
+    if (is_single_node_) {
+      set_single_node(false);
+    }
   }
   if (OB_LIKELY(us_to_expired > 0)) {
     if (us_to_expired - CALCULATE_TRIGGER_ELECT_WATER_MARK() < 0) {

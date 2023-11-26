@@ -141,7 +141,7 @@ int ObTenantNodeBalancer::process_one_round()
   int ret;
   TenantUnits units;
   int64_t sys_unit_cnt = 0;
-  ObCurTraceId::init(GCONF.self_addr_);
+  // ObCurTraceId::init(GCONF.self_addr_);
   if (!ObServerCheckpointSlogHandler::get_instance().is_started()) {
     // do nothing if not finish replaying slog
     LOG_INFO("server slog not finish replaying, need wait");

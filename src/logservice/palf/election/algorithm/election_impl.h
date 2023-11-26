@@ -297,7 +297,7 @@ private:
   EventRecorder event_recorder_;// 事件汇报模块
   mutable ElectionMsgCounter msg_counter_;// 监控模块
 
-  bool is_single_node_ = false;
+  volatile bool is_single_node_ = false;
 };
 
 }// namespace election

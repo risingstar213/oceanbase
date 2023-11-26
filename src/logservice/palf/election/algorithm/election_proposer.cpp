@@ -122,6 +122,7 @@ int ElectionProposer::set_member_list(const MemberList &new_member_list)
       LOG_SET_MEMBER(WARN, "set new member list failed");
     } else {
       if (old_list.get_addr_list().empty() && new_member_list.get_addr_list().count() == 1) {// 单副本第一次设置成员列表
+        p_election_->set_single_node(true);
         prepare(ObRole::FOLLOWER);
       }
       if (old_list.only_membership_version_different(new_member_list)) {

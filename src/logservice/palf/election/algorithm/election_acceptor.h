@@ -41,6 +41,10 @@ public:
   void on_prepare_request(const ElectionPrepareRequestMsg &prepare_req);
   void on_accept_request(const ElectionAcceptRequestMsg &accept_req, int64_t *us_to_expired);
   int64_t to_string(char *buf, const int64_t buf_len) const;
+  void single_node_election_on_prepare_request(const ElectionPrepareRequestMsg &prepare_req);
+  lib::ObMutex lock_;
+  bool last_record_lease_valid_state_ = false;
+  ObAddr last_record_lease_owner_;
 private:
   void reset_time_window_states_(const LogPhase phase);
   void advance_ballot_number_and_reset_related_states_(const int64_t new_ballot_number, const LogPhase phase);
