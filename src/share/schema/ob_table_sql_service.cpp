@@ -2788,9 +2788,19 @@ int ObTableSqlService::create_table_for_create_schemas(ObTableSchema &table,
         LOG_WARN("failed to add foreign key", K(ret));
       }
     }
-  } else if (table.view_column_filled() //view table
+  }  else {
+    end_usec = ObTimeUtility::current_time();
+    cost_usec = end_usec - start_usec;
+    start_usec = end_usec;
+    LOG_INFO("add_table cost: ", K(cost_usec));
+    if (table.view_column_filled() //view table
              && OB_FAIL(add_columns(sql_client, table))) {
-    LOG_WARN("insert column schema failed, ", K(ret), "table", to_cstring(table));
+      LOG_WARN("insert column schema failed, ", K(ret), "table", to_cstring(table));
+    }
+    end_usec = ObTimeUtility::current_time();
+    cost_usec = end_usec - start_usec;
+    start_usec = end_usec;
+    LOG_INFO("add_column cost: ", K(cost_usec));
   }
 
   ObSchemaOperation opt;

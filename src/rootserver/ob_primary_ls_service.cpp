@@ -105,6 +105,9 @@ int ObPrimaryLSService::process_one_round(uint64_t tenant_id)
   ObPrimaryLSService tmp_service;
   tmp_service.tenant_id_ = tenant_id;
   tmp_service.inited_    = true;
+  tmp_service.set_stop(false);
+
+  LOG_INFO("process_one_round", "tenant_id", tenant_id);
 
   int tmp_ret = OB_SUCCESS;
   share::schema::ObTenantSchema tenant_schema;

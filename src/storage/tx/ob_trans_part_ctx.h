@@ -82,8 +82,8 @@ enum
 namespace transaction
 {
 
-const static int64_t OB_TX_MAX_LOG_CBS = 15;
-const static int64_t PREALLOC_LOG_CALLBACK_COUNT = 3;
+const static int64_t OB_TX_MAX_LOG_CBS = 31;
+const static int64_t PREALLOC_LOG_CALLBACK_COUNT = 8;
 const static int64_t RESERVE_LOG_CALLBACK_COUNT_FOR_FREEZING = 1;
 
 // participant transaction context

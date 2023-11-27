@@ -22014,8 +22014,8 @@ int ObDDLService::create_tenant(
       }
 
       enable_meta_user_parallel_ = false;
-      meta_user_parallel_sync_ = false;
-      // meta_user_core_count_ = 0;
+      ATOMIC_SET(&meta_user_parallel_sync_, false);
+      ATOMIC_SET(&meta_user_core_count_, 0);
 
       int th_ret1; int th_ret2;
       ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
@@ -22058,8 +22058,8 @@ int ObDDLService::create_tenant(
       }
 
       enable_meta_user_parallel_ = false;
-      meta_user_parallel_sync_ = false;
-      // meta_user_core_count_ = 0;
+      ATOMIC_SET(&meta_user_parallel_sync_, false);
+      ATOMIC_SET(&meta_user_core_count_, 0);
 
       // if (OB_FAIL(create_normal_tenant(meta_tenant_id, pools, meta_tenant_schema, tenant_role,
       //   recovery_until_scn, meta_sys_variable, false/*create_ls_with_palf*/, meta_palf_base_info, init_configs,
@@ -22099,6 +22099,7 @@ int ObDDLService::create_tenant(
   // activate user ls service
   ObPrimaryLSService::process_one_round(user_tenant_id);
   ObCommonLSService::process_one_round(meta_tenant_id);
+  ObPrimaryLSService::process_one_round(user_tenant_id);
 
   if (OB_SUCC(ret)) {
     tenant_id = user_tenant_id;
@@ -22685,7 +22686,7 @@ int ObDDLService::create_normal_tenant(
     ATOMIC_SET(&meta_user_parallel_sync_, true);
   }
   if (wait_for_sync) {
-    while (!meta_user_parallel_sync_);
+    while (!ATOMIC_LOAD(&meta_user_parallel_sync_));
   }
 
   if (OB_FAIL(check_inner_stat())) {
@@ -23402,7 +23403,7 @@ int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTable
     int64_t refreshed_schema_version = 0;
     if (OB_FAIL(trans.start(sql_proxy_, tenant_id, refreshed_schema_version))) {
       LOG_WARN("start transaction failed", KR(ret));
-    } else if (OB_FAIL(trans.enable_async(sql_proxy_, tenant_id))) {
+    } else if (!core_table && OB_FAIL(trans.enable_async(sql_proxy_, tenant_id))) {
       LOG_WARN("enable async failed", KR(ret));
     } else {
       for (int64_t idx = begin;idx < end && OB_SUCC(ret); idx++) {
@@ -23597,6 +23598,80 @@ int ObDDLService::parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSc
   return ret;
 }
 
+int ObDDLService::parallel_create_schemas_with_core(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, ObIArray<ObTableSchema*> &core_table_schemas)
+{
+  int THREAD_NUM = 3;
+  if (is_sys_tenant(tenant_id)) {
+    THREAD_NUM = 7;
+  }
+  
+  int ret = OB_SUCCESS;
+  int64_t begin = 0;
+  int64_t batch_count = table_schemas.count() / THREAD_NUM;
+
+  const int64_t MAX_RETRY_TIMES = 10;
+  int64_t finish_cnt = 0;
+
+  LOG_INFO("parallel_create_schemas start", "count", table_schemas.count());
+  int64_t start_ts = ObTimeUtility::fast_current_time();
+
+  if (table_schemas.count() < 50) {
+    return batch_create_schema_local(tenant_id, table_schemas, 0, table_schemas.count());
+  }
+
+  std::vector<std::thread> ths;
+  ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
+  std::thread core_ths([&] () {
+    set_thread_name("batch_create_schema_thread_with_std");
+    int ret = OB_SUCCESS;
+    ObCurTraceId::set(*cur_trace_id);
+    ret = batch_create_schema_local(tenant_id, core_table_schemas, 0, core_table_schemas.count(), true);
+    LOG_INFO("core table return");
+  });
+  ths.push_back(std::move(core_ths));
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_schemas.count(); ++i) {
+    if (table_schemas.count() == (i + 1) || (i + 1 - begin) >= batch_count) {
+      std::thread th([&, begin, i, cur_trace_id] () {
+        set_thread_name("batch_create_schema_thread_with_std");
+        int ret = OB_SUCCESS;
+        ObCurTraceId::set(*cur_trace_id);
+        int64_t retry_times = 1;
+        while (OB_SUCC(ret)) {
+          if (OB_FAIL(batch_create_schema_local(tenant_id, table_schemas, begin, i + 1))) {
+            LOG_WARN("batch create schema failed", K(ret), "table count", i + 1 - begin);
+            if (retry_times <= MAX_RETRY_TIMES) {
+              retry_times++;
+              ret = OB_SUCCESS;
+              LOG_INFO("schema error while create table, need retry", KR(ret), K(retry_times));
+              usleep(1 * 1000 * 1000L); // 1s
+            } else {
+              break;
+            }
+          } else {
+            ATOMIC_AAF(&finish_cnt, i + 1 - begin);
+            break;
+          }
+        }
+        LOG_INFO("worker job", K(begin), K(i), K(i-begin), K(ret));
+      });
+      ths.push_back(std::move(th));
+      if (OB_SUCC(ret)) {
+        begin = i + 1;
+      }
+    }
+  }
+  for (auto &th : ths) {
+    th.join();
+  }
+  if (finish_cnt != table_schemas.count()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("parallel_create_table_schema fail", K(finish_cnt), K(table_schemas.count()), K(ret), K(tenant_id));
+  } else {
+    LOG_INFO("parallel_create_schemas end", "count", table_schemas.count(), "time", ObTimeUtility::fast_current_time() - start_ts);
+  }
+  return ret;
+}
+
 int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id, ObIArray<ObTableSchema> &table_schemas)
 {
   int ret = OB_SUCCESS;
@@ -23604,7 +23679,6 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   ObSArray<ObTableSchema*> this_round_tables;
   ObSArray<ObTableSchema*> next_round_tables;
 
-  ObIArray<ObTableSchema> &refer_tables = table_schemas;
   std::unordered_set<uint64_t> table_ids;
 
   // bool wait_for_sync = enable_meta_user_parallel_ && is_user_tenant(tenant_id);
@@ -23630,6 +23704,11 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
     LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
     return ret;
   }
+
+  // if (enable_meta_user_parallel_) {
+  //   ATOMIC_AAF(&meta_user_core_count_, 1);
+  //   while (ATOMIC_LOAD(&meta_user_core_count_) < 2);
+  // }
   
   while (!flag) {
     flag = true;
@@ -23660,6 +23739,13 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
     next_round_tables.reset(); next_round_tables.reuse();
     next_round_tables.assign(tmp_tables);
   }
+
+  // if (enable_meta_user_parallel_) {
+  //   ATOMIC_AAF(&meta_user_core_count_, 1);
+  //   while (ATOMIC_LOAD(&meta_user_core_count_) < 4);
+  // }
+
+  // LOG_INFO("end parallel process");
 
   return ret;
 }

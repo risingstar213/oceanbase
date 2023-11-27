@@ -2060,6 +2060,7 @@ private:
       ObMySQLTransaction &trans,
       common::ObIArray<share::schema::ObTableSchema> &tables);
   int parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas);
+  int parallel_create_schemas_with_core(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, ObIArray<ObTableSchema*> &core_table_schemas);
 
   int try_force_drop_tenant(const share::schema::ObTenantSchema &tenant_schema);
 

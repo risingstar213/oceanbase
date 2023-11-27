@@ -119,6 +119,7 @@ int ObCommonLSService::process_one_round(uint64_t tenant_id)
   ObCommonLSService tmp_service;
   tmp_service.tenant_id_ = tenant_id;
   tmp_service.inited_    = true;
+  tmp_service.set_stop(false);
 
   share::schema::ObTenantSchema user_tenant_schema;
   int tmp_ret = OB_SUCCESS;
