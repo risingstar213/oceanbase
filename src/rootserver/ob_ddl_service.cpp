@@ -22013,11 +22013,27 @@ int ObDDLService::create_tenant(
         LOG_WARN("get_pools failed", KR(ret), K(arg));
       }
 
-      enable_meta_user_parallel_ = true;
+      enable_meta_user_parallel_ = false;
       meta_user_parallel_sync_ = false;
+      // meta_user_core_count_ = 0;
 
       int th_ret1; int th_ret2;
       ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
+
+      std::thread th1([&]() {
+        int ret = OB_SUCCESS;
+        set_thread_name("create_tenant_meta");
+        ObCurTraceId::set(*cur_trace_id);
+
+        if (OB_FAIL(create_normal_tenant(meta_tenant_id, pools, meta_tenant_schema, tenant_role,
+          recovery_until_scn, meta_sys_variable, false/*create_ls_with_palf*/, meta_palf_base_info, init_configs,
+          arg.is_creating_standby_, arg.log_restore_source_))) {
+          LOG_WARN("fail to create meta tenant", KR(ret), K(meta_tenant_id), K(pools), K(meta_sys_variable),
+              K(tenant_role), K(recovery_until_scn), K(meta_palf_base_info), K(init_configs));
+        }
+
+         ATOMIC_SET(&th_ret1, ret);
+      });
 
       std::thread th2([&]() {
         int ret = OB_SUCCESS;
@@ -22032,22 +22048,7 @@ int ObDDLService::create_tenant(
               K(tenant_role), K(recovery_until_scn), K(user_palf_base_info));
         }
 
-        ATOMIC_SET(&th_ret2, ret);
-      });
-
-      std::thread th1([&]() {
-        int ret = OB_SUCCESS;
-        set_thread_name("create_tenant_meta");
-        ObCurTraceId::set(*cur_trace_id);
-
-        if (OB_FAIL(create_normal_tenant(meta_tenant_id, pools, meta_tenant_schema, tenant_role,
-          recovery_until_scn, meta_sys_variable, false/*create_ls_with_palf*/, meta_palf_base_info, init_configs,
-          arg.is_creating_standby_, arg.log_restore_source_))) {
-          LOG_WARN("fail to create meta tenant", KR(ret), K(meta_tenant_id), K(pools), K(meta_sys_variable),
-              K(tenant_role), K(recovery_until_scn), K(meta_palf_base_info), K(init_configs));
-        }
-
-        ATOMIC_SET(&th_ret1, ret);
+         ATOMIC_SET(&th_ret2, ret);
       });
 
 
@@ -22058,6 +22059,7 @@ int ObDDLService::create_tenant(
 
       enable_meta_user_parallel_ = false;
       meta_user_parallel_sync_ = false;
+      // meta_user_core_count_ = 0;
 
       // if (OB_FAIL(create_normal_tenant(meta_tenant_id, pools, meta_tenant_schema, tenant_role,
       //   recovery_until_scn, meta_sys_variable, false/*create_ls_with_palf*/, meta_palf_base_info, init_configs,
@@ -23385,7 +23387,7 @@ int ObDDLService::create_sys_table_schemas(
   return ret;
 }
 
-int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, const int64_t begin, const int64_t end)
+int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, const int64_t begin, const int64_t end, bool core_table)
 {
   int ret = OB_SUCCESS;
   // LOG_INFO("batch_create_schema_local");
@@ -23396,12 +23398,12 @@ int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTable
   } else {
     ObDDLOperator ddl_operator(get_schema_service(), get_sql_proxy());
     // for test
-    ObDDLSQLTransaction trans(schema_service_, true, true, true, false);
+    ObDDLSQLTransaction trans(schema_service_, true, true, false, false);
     int64_t refreshed_schema_version = 0;
     if (OB_FAIL(trans.start(sql_proxy_, tenant_id, refreshed_schema_version))) {
       LOG_WARN("start transaction failed", KR(ret));
-    // } else if (OB_FAIL(trans.enable_async(sql_proxy_, tenant_id))) {
-    //   LOG_WARN("enable async failed", KR(ret));
+    } else if (OB_FAIL(trans.enable_async(sql_proxy_, tenant_id))) {
+      LOG_WARN("enable async failed", KR(ret));
     } else {
       for (int64_t idx = begin;idx < end && OB_SUCC(ret); idx++) {
         ObTableSchema &table = *table_schemas.at(idx);
@@ -23410,7 +23412,12 @@ int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTable
                                           is_sys_lob_table(table.get_table_id()));
 
         int64_t start_time = ObTimeUtility::current_time();
-        if (OB_FAIL(ddl_operator.create_table(table, trans, ddl_stmt,
+
+        bool is_last_core_table = core_table && (idx == (end - 1));
+        if (OB_FAIL(ddl_operator.create_table_for_create_tenants(table, 
+                                              trans, 
+                                              is_last_core_table,
+                                              ddl_stmt,
                                               need_sync_schema_version,
                                               false))) {
           LOG_WARN("add table schema failed", K(ret),
@@ -23493,9 +23500,9 @@ void ob_pthread_join(void *ptr);
 // 如果没有相关性，可以直接以 batch 为单位并行
 int ObDDLService::parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas)
 {
-  int THREAD_NUM = 8;
+  int THREAD_NUM = 4;
   if (is_sys_tenant(tenant_id)) {
-    THREAD_NUM = 16;
+    THREAD_NUM = 8;
   }
   
   int ret = OB_SUCCESS;
@@ -23600,6 +23607,9 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   ObIArray<ObTableSchema> &refer_tables = table_schemas;
   std::unordered_set<uint64_t> table_ids;
 
+  // bool wait_for_sync = enable_meta_user_parallel_ && is_user_tenant(tenant_id);
+  // bool generate_sync = enable_meta_user_parallel_ && is_meta_tenant(tenant_id);
+
   bool flag = true;
 
   std::unordered_set<uint64_t> tmp_ids;
@@ -23609,13 +23619,14 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
       tmp_ids.insert(table.get_table_id());
       this_round_tables.push_back(&table);
     } else {
-      tmp_ids.insert(table.get_table_id());
+      // tmp_ids.insert(table.get_table_id());
+      flag = false;
       next_round_tables.push_back(&table);
     }
   }
   table_ids.insert(tmp_ids.begin(), tmp_ids.end());
   // core table
-  if (OB_FAIL(batch_create_schema_local(tenant_id, this_round_tables, 0, this_round_tables.count()))) {
+  if (OB_FAIL(batch_create_schema_local(tenant_id, this_round_tables, 0, this_round_tables.count(), true))) {
     LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
     return ret;
   }

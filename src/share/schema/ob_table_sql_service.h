@@ -43,6 +43,13 @@ public:
                            const common::ObString *ddl_stmt_str = NULL,
                            const bool need_sync_schema_version = true,
                            const bool is_truncate_table = false);
+
+  int create_table_for_create_schemas(ObTableSchema &table,
+                           common::ObISQLClient &sql_client,
+                           const bool is_last_core_table,
+                           const common::ObString *ddl_stmt_str = NULL,
+                           const bool need_sync_schema_version = true,
+                           const bool is_truncate_table = false);
   //update table option
   int update_table_options(common::ObISQLClient &sql_client,
                           const ObTableSchema &table_schema,

@@ -249,6 +249,13 @@ public:
                            const common::ObString *ddl_stmt_str = NULL,
                            const bool need_sync_schema_version = true,
                            const bool is_truncate_table = false);
+  int create_table_for_create_tenants(share::schema::ObTableSchema &table_schema,
+                           common::ObMySQLTransaction &trans,
+                           const bool is_last_core_table,
+                           const common::ObString *ddl_stmt_str = NULL,
+                           const bool need_sync_schema_version = true,
+                           const bool is_truncate_table = false);
+  
   int create_tables(common::ObIArray<share::schema::ObTableSchema> &tables,
                     common::ObMySQLTransaction &trans);
   int truncate_table(const ObString *ddl_stmt_str,

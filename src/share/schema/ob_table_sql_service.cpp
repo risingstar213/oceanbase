@@ -2708,6 +2708,145 @@ int ObTableSqlService::create_table(ObTableSchema &table,
   return ret;
 }
 
+int ObTableSqlService::create_table_for_create_schemas(ObTableSchema &table,
+                           common::ObISQLClient &sql_client,
+                           const bool is_last_core_table,
+                           const common::ObString *ddl_stmt_str /* = NULL */,
+                           const bool need_sync_schema_version /* = true */,
+                           const bool is_truncate_table /* = false */)
+{
+  int ret = OB_SUCCESS;
+  int64_t start_usec = ObTimeUtility::current_time();
+  int64_t end_usec = 0;
+  int64_t cost_usec = 0;
+  const uint64_t tenant_id = table.get_tenant_id();
+
+  if (!table.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid create table argument, ", K(table));
+  } else if (OB_FAIL(check_ddl_allowed(table))) {
+    LOG_WARN("check ddl allowd failed", K(ret), K(table));
+  }
+  if (OB_SUCCESS == ret && 0 != table.get_autoinc_column_id()) {
+    if (OB_FAIL(add_sequence(tenant_id, table.get_table_id(),
+                             table.get_autoinc_column_id(), table.get_auto_increment(),
+                             table.get_truncate_version()))) {
+      LOG_WARN("insert sequence record faild", K(ret), K(table));
+    }
+    end_usec = ObTimeUtility::current_time();
+    cost_usec = end_usec - start_usec;
+    start_usec = end_usec;
+    LOG_INFO("add_sequence for autoinc cost: ", K(cost_usec));
+  }
+
+  bool only_history = false;
+  uint64_t data_version = 0;
+  const bool update_object_status_ignore_version = false;
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(GET_MIN_DATA_VERSION(tenant_id, data_version))) {
+    LOG_WARN("failed to get data version", K(ret));
+  } else if (table.is_view_table() && data_version >= DATA_VERSION_4_1_0_0
+             && !table.is_sys_view()
+             && !table.is_force_view() && table.get_column_count() <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get wrong view schema", K(ret), K(table));
+  } else if (data_version >= DATA_VERSION_4_1_0_0
+             && table.is_force_view()
+             && table.get_column_count() <= 0
+             && FALSE_IT(table.set_object_status(ObObjectStatus::INVALID))) {
+  } else if (table.is_view_table() && data_version >= DATA_VERSION_4_1_0_0
+             && table.get_column_count() > 0
+             && FALSE_IT(table.set_view_column_filled_flag(ObViewColumnFilledFlag::FILLED))) {
+  } else if (OB_FAIL(add_table(sql_client, table, update_object_status_ignore_version, only_history))) {
+    LOG_WARN("insert table schema failed, ", K(ret), "table", to_cstring(table));
+  } else if (!table.is_view_table()) {
+    end_usec = ObTimeUtility::current_time();
+    cost_usec = end_usec - start_usec;
+    start_usec = end_usec;
+    LOG_INFO("add_table cost: ", K(cost_usec));
+    if (OB_FAIL(add_columns(sql_client, table))) {
+      LOG_WARN("insert column schema failed, ", K(ret), "table", to_cstring(table));
+    } else if (OB_FAIL(add_constraints(sql_client, table))) {
+      LOG_WARN("insert constraint schema failed, ", K(ret), "table", to_cstring(table));
+    }
+    end_usec = ObTimeUtility::current_time();
+    cost_usec = end_usec - start_usec;
+    start_usec = end_usec;
+    LOG_INFO("add_column cost: ", K(cost_usec));
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(add_table_part_info(sql_client, table))) {
+        LOG_WARN("fail to add_table_part_info", K(ret));
+      }
+      end_usec = ObTimeUtility::current_time();
+      cost_usec = end_usec - start_usec;
+      start_usec = end_usec;
+      LOG_INFO("add part info cost: ", K(cost_usec));
+    }
+    // insert into all_foreign_key.
+    if (OB_SUCC(ret) && !is_inner_table(table.get_table_id())) {
+      if (OB_FAIL(add_foreign_key(sql_client, table, false/* only_history */))) {
+        LOG_WARN("failed to add foreign key", K(ret));
+      }
+    }
+  } else if (table.view_column_filled() //view table
+             && OB_FAIL(add_columns(sql_client, table))) {
+    LOG_WARN("insert column schema failed, ", K(ret), "table", to_cstring(table));
+  }
+
+  ObSchemaOperation opt;
+  opt.tenant_id_ = tenant_id;
+  opt.database_id_ = table.get_database_id();
+  opt.tablegroup_id_ = table.get_tablegroup_id();
+  opt.table_id_ = table.get_table_id();
+  if (is_truncate_table) {
+    opt.op_type_ = OB_DDL_TRUNCATE_TABLE_CREATE;
+  } else {
+    if (table.is_index_table()) {
+      opt.op_type_ = table.is_global_index_table() ? OB_DDL_CREATE_GLOBAL_INDEX : OB_DDL_CREATE_INDEX;
+    } else if (table.is_view_table()){
+      opt.op_type_ = OB_DDL_CREATE_VIEW;
+    } else {
+      opt.op_type_ = OB_DDL_CREATE_TABLE;
+    }
+  }
+  opt.schema_version_ = table.get_schema_version();
+  opt.ddl_stmt_str_ = ddl_stmt_str ? *ddl_stmt_str : ObString();
+  if (OB_SUCC(ret)) {
+    // if (OB_FAIL(log_operation_wrapper(opt, sql_client))) {
+    //   LOG_WARN("log operation failed", K(opt), K(ret));
+    // }
+
+    if (OB_FAIL(log_operation(opt, sql_client))) {
+      LOG_WARN("failed to log operation", K(opt), K(ret));
+    } else if (is_last_core_table && is_core_table(opt.table_id_)) {
+      if (OB_FAIL(log_core_operation(sql_client, opt.tenant_id_, opt.schema_version_))) {
+        LOG_WARN("log_core_version failed", K(ret), K(opt.tenant_id_), K(opt.schema_version_));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      end_usec = ObTimeUtility::current_time();
+      cost_usec = end_usec - start_usec;
+      start_usec = end_usec;
+      LOG_INFO("log_operation cost: ", K(cost_usec));
+    }
+
+    if (OB_SUCC(ret)) {
+      LOG_DEBUG("add table", "table type", table.get_table_type(), "index type", table.get_index_type());
+      if ((table.is_index_table() || table.is_materialized_view() || table.is_aux_vp_table() || table.is_aux_lob_table()) && need_sync_schema_version) {
+        if (OB_FAIL(update_data_table_schema_version(sql_client, tenant_id,
+            table.get_data_table_id(), table.get_in_offline_ddl_white_list()))) {
+          LOG_WARN("fail to update schema_version", K(ret));
+        }
+        end_usec = ObTimeUtility::current_time();
+        cost_usec = end_usec - start_usec;
+        start_usec = end_usec;
+        LOG_INFO("update_data_table_schema_version cost: ", K(cost_usec));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObTableSqlService::update_index_status(
     const ObTableSchema &data_table_schema,
     const uint64_t index_table_id,

@@ -1974,7 +1974,7 @@ public:
       share::schema::ObSchemaGetterGuard &schema_guard,
       common::ObIArray<common::ObRegion> &primary_regions);
 
-  int batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, const int64_t begin, const int64_t end);
+  int batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, const int64_t begin, const int64_t end, bool core_table = false);
   int parallel_create_schemas_check_correlartion(uint64_t tenant_id, ObIArray<ObTableSchema> &table_schemas);
 
   int parallel_create_schemas_user_dep(uint64_t tenant_id, ObIArray<ObTableSchema> &table_schemas);
@@ -2591,6 +2591,8 @@ private:
 
   volatile bool enable_meta_user_parallel_ = false;
   volatile bool meta_user_parallel_sync_   = false;
+
+  volatile int meta_user_core_count_ = 0;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObDDLService);
 };
