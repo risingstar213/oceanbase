@@ -41,6 +41,8 @@
 #include "sql/code_generator/ob_static_engine_expr_cg.h"
 #include "observer/ob_inner_sql_connection_pool.h"
 #include "share/ls/ob_ls_status_operator.h"
+#include "rootserver/ob_common_ls_service.h"
+#include "rootserver/ob_primary_ls_service.h"
 namespace oceanbase
 {
 using namespace common;
@@ -96,11 +98,21 @@ int ObCreateTenantExecutor::execute(ObExecContext &ctx, ObCreateTenantStmt &stmt
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("if_not_exist not set and tenant_id invalid tenant_id", K(create_tenant_arg), K(tenant_id), K(ret));
   } else if (OB_INVALID_ID != tenant_id) {
+    
+    int meta_tenant_id = gen_meta_tenant_id(tenant_id);
+
     int tmp_ret = OB_SUCCESS; // try refresh schema and wait ls valid
     if (OB_TMP_FAIL(wait_schema_refreshed_(tenant_id))) {
       LOG_WARN("fail to wait schema refreshed", KR(tmp_ret), K(tenant_id));
       // 4s + 2s = 6s
-    } else if (OB_TMP_FAIL(wait_user_ls_valid_(tenant_id))) {
+    }
+
+    // activate user ls service
+    rootserver::ObPrimaryLSService::process_one_round(tenant_id);
+    rootserver::ObCommonLSService::process_one_round(meta_tenant_id);
+    rootserver::ObPrimaryLSService::process_one_round(tenant_id);
+    
+    if (OB_TMP_FAIL(wait_user_ls_valid_(tenant_id))) {
       LOG_WARN("failed to wait user ls valid, but ignore", KR(tmp_ret), K(tenant_id));
     }
   }

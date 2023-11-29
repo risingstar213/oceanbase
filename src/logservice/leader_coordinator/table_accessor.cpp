@@ -52,7 +52,7 @@ int get_tenant_server_list(common::ObIArray<common::ObAddr> &tenant_server_list)
 }
 
 LsElectionReferenceInfoRow::LsElectionReferenceInfoRow(const uint64_t tenant_id, const share::ObLSID &ls_id)
-: tenant_id_(tenant_id), ls_id_(ls_id), exec_tenant_id_(get_private_table_exec_tenant_id(tenant_id_)) {}
+: tenant_id_(tenant_id), ls_id_(ls_id), exec_tenant_id_(OB_SYS_TENANT_ID) {}
 
 LsElectionReferenceInfoRow::~LsElectionReferenceInfoRow()
 {
@@ -577,7 +577,7 @@ int TableAccessor::get_all_ls_election_reference_info(common::ObIArray<LsElectio
     COORDINATOR_LOG_(WARN, "zone name is empty");
   } else if (CLICK_FAIL(databuff_printf(where_condition, STACK_BUFFER_SIZE, pos, "where tenant_id=%ld", MTL_ID()))) {
     COORDINATOR_LOG_(WARN, "get where condition string failed");
-  } else if (CLICK_FAIL(ObTableAccessHelper::read_multi_row(get_private_table_exec_tenant_id(MTL_ID()), columns, share::OB_ALL_LS_ELECTION_REFERENCE_INFO_TNAME, where_condition, lines))) {
+  } else if (CLICK_FAIL(ObTableAccessHelper::read_multi_row(OB_SYS_TENANT_ID, columns, share::OB_ALL_LS_ELECTION_REFERENCE_INFO_TNAME, where_condition, lines))) {
     COORDINATOR_LOG_(WARN, "read multi row failed");
   } else if (CLICK_FAIL(get_zone_stop_status(zone_name_holder, is_zone_stopped))) {
     COORDINATOR_LOG_(WARN, "get zone stop status failed");

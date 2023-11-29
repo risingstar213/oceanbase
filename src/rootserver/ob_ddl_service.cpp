@@ -105,8 +105,6 @@
 #include "logservice/data_dictionary/ob_data_dict_storager.h" // ObDataDictStorage
 #include "share/scn.h"
 #include "share/backup/ob_backup_config.h" // ObBackupConfigParserMgr
-#include "rootserver/ob_common_ls_service.h"
-#include "rootserver/ob_primary_ls_service.h"
 #ifdef OB_BUILD_ARBITRATION
 #include "share/arbitration_service/ob_arbitration_service_table_operator.h"
 #include "share/arbitration_service/ob_arbitration_service_utils.h" // ObArbitrationServiceUtils
@@ -22096,10 +22094,6 @@ int ObDDLService::create_tenant(
     LOG_WARN("failed to create tenant end", KR(ret), K(user_tenant_id));
   }
 
-  // activate user ls service
-  ObPrimaryLSService::process_one_round(user_tenant_id);
-  ObCommonLSService::process_one_round(meta_tenant_id);
-  ObPrimaryLSService::process_one_round(user_tenant_id);
 
   if (OB_SUCC(ret)) {
     tenant_id = user_tenant_id;
