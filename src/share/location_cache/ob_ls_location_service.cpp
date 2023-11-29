@@ -537,7 +537,7 @@ int ObLSLocationService::batch_process_tasks(
   } else {
     const ObLSLocationUpdateTask &task = tasks.at(0);
     const uint64_t tenant_id = task.get_tenant_id();
-    const uint64_t superior_tenant_id = get_private_table_exec_tenant_id(tenant_id);
+    const uint64_t superior_tenant_id = OB_SYS_TENANT_ID;  // get_private_table_exec_tenant_id(tenant_id);
     ObLSLocation location;
     ObArray<ObLSLocation> locations;
     if (OB_ISNULL(GCTX.schema_service_)) {

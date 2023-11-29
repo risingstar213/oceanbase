@@ -22709,6 +22709,9 @@ int ObDDLService::create_normal_tenant(
     //standby cluster no need create sys tablet and init tenant schema
   } else if (OB_FAIL(ObSchemaUtils::construct_inner_table_schemas(tenant_id, tables))) {
     LOG_WARN("fail to get inner table schemas in tenant space", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(broadcast_sys_table_schemas(tenant_id, tables))) {
+    // 0.2s
+    LOG_WARN("fail to broadcast sys table schemas", KR(ret), K(tenant_id));
   } else if (OB_FAIL(create_tenant_sys_tablets(tenant_id, tables))) {
     // 0.5s
     LOG_WARN("fail to create tenant partitions", KR(ret), K(tenant_id));
@@ -22878,7 +22881,7 @@ int ObDDLService::create_tenant_sys_ls_wait_leader(int tenant_id)
     LOG_WARN("fail to wait election leader", KR(ret), K(tenant_id), K(SYS_LS), K(timeout));
   }
   int64_t wait_leader_end = ObTimeUtility::current_time();
-  wait_leader = wait_leader_end - wait_leader_end;
+  wait_leader = wait_leader_end - wait_leader_start;
   LOG_INFO("create_tenant_wait_sys_ls", "wait leader", wait_leader);
   return ret;
 }
@@ -22887,6 +22890,7 @@ int ObDDLService::broadcast_sys_table_schemas(
     const uint64_t tenant_id,
     common::ObIArray<ObTableSchema> &tables)
 {
+  create_tenant_sys_ls_wait_leader(tenant_id);
   const int64_t start_time = ObTimeUtility::fast_current_time();
   LOG_INFO("[CREATE_TENANT] STEP 2.2. start broadcast sys table schemas", K(tenant_id));
   int ret = OB_SUCCESS;
@@ -23088,12 +23092,6 @@ int ObDDLService::create_tenant_sys_tablets(
         }
       }
     } // end for
-    create_tenant_sys_ls_wait_leader(tenant_id);
-
-    if (OB_FAIL(broadcast_sys_table_schemas(tenant_id, tables))) {
-     // 0.2s
-     LOG_WARN("fail to broadcast sys table schemas", KR(ret), K(tenant_id));
-    }
     LOG_INFO("start table create execute");
     if (FAILEDx(table_creator.execute())) {
       LOG_WARN("fail to execute creator", KR(ret), K(tenant_id));
@@ -23740,10 +23738,10 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
     next_round_tables.assign(tmp_tables);
   }
 
-  // if (enable_meta_user_parallel_) {
-  //   ATOMIC_AAF(&meta_user_core_count_, 1);
-  //   while (ATOMIC_LOAD(&meta_user_core_count_) < 4);
-  // }
+  if (enable_meta_user_parallel_) {
+    ATOMIC_AAF(&meta_user_core_count_, 1);
+    while (ATOMIC_LOAD(&meta_user_core_count_) < 2);
+  }
 
   // LOG_INFO("end parallel process");
 

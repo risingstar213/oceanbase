@@ -12,6 +12,7 @@
 
 #define USING_LOG_PREFIX SHARE
 #include "share/ob_leader_election_waiter.h"
+#include "sql/engine/ob_exec_context.h"
 
 #include "share/schema/ob_table_schema.h"
 #include "share/schema/ob_part_mgr_util.h"
@@ -187,6 +188,7 @@ int ObLSLeaderElectionWaiter::wait_elect_leader(
         break;
       }
       if (OB_SUCCESS != ret || leader != leader_replica->get_server()) {
+        GCTX.ob_service_->submit_ls_update_task(tenant_id, ls_id);
         const int64_t now = ObTimeUtility::current_time();
         if (now < abs_timeout) {
           if (OB_FAIL(check_sleep(std::min(sleep_interval, abs_timeout - now)))) {

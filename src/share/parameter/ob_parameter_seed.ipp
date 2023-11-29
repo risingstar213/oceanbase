@@ -465,7 +465,7 @@ DEF_TIME(server_check_interval, OB_CLUSTER_PARAMETER, "30s", "[1s,)",
          "the time interval between schedules of a task "
          "that examines the __all_server table. Range: [1s, +∞)",
          ObParameterAttr(Section::ROOT_SERVICE, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
-DEF_TIME(rootservice_ready_check_interval, OB_CLUSTER_PARAMETER, "10s", "[100000us, 1m]",
+DEF_TIME(rootservice_ready_check_interval, OB_CLUSTER_PARAMETER, "3s", "[100000us, 1m]",
          "the interval between the schedule of the rootservice restart task while restart failed "
          "Range: [100000us, 1m]",
          ObParameterAttr(Section::ROOT_SERVICE, Source::DEFAULT, EditLevel::DYNAMIC_EFFECTIVE));
