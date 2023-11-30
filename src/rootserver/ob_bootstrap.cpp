@@ -595,6 +595,30 @@ int ObBootstrap::execute_bootstrap(rootserver::ObServerZoneOpService &server_zon
 
   if (FAILEDx(add_servers_in_rs_list(server_zone_op_service))) {
     LOG_WARN("fail to add servers in rs_list_", KR(ret));
+  }
+  omt::ObTenantNodeBalancer::get_instance().process_one_round();
+
+  bool get_start_time = false;
+  while (!get_start_time) {
+    get_start_time = (GCTX.start_service_time_ != 0);
+    if (!get_start_time) {
+      USLEEP(10 * 1000);
+    }
+  }
+
+  // update time
+  common::ObMySQLTransaction trans;
+  trans.start(GCTX.sql_proxy_, OB_SYS_TENANT_ID);
+  ObServerTableOperator::update_start_service_time(
+    trans,
+    GCTX.self_addr(),
+    0,
+    GCTX.start_service_time_
+  );
+  trans.end(true);
+  SVR_TRACER.refresh();
+
+  if (OB_FAIL(ret)) {
   } else if (OB_FAIL(wait_all_rs_in_service())) {
     LOG_WARN("failed to wait all rs in service", KR(ret));
   } else {
@@ -1118,7 +1142,7 @@ int ObBootstrap::add_servers_in_rs_list(rootserver::ObServerZoneOpService &serve
 int ObBootstrap::wait_all_rs_in_service()
 {
   int ret = OB_SUCCESS;
-  const int64_t check_interval = 100 * 1000;
+  const int64_t check_interval = 50 * 1000;
   int64_t left_time_can_sleep = WAIT_RS_IN_SERVICE_TIMEOUT_US;
   if (OB_FAIL(check_inner_stat())) {
     LOG_WARN("check_inner_stat failed", K(ret));
