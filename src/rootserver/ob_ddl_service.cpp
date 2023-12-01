@@ -23734,10 +23734,10 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
     return ret;
   }
 
-  // if (enable_meta_user_parallel_) {
-  //   ATOMIC_AAF(&meta_user_core_count_, 1);
-  //   while (ATOMIC_LOAD(&meta_user_core_count_) < 2);
-  // }
+  if (enable_meta_user_parallel_) {
+    ATOMIC_AAF(&meta_user_core_count_, 1);
+    while (ATOMIC_LOAD(&meta_user_core_count_) < 2);
+  }
   
   // while (!flag) {
   //   flag = true;
