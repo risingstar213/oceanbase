@@ -185,7 +185,7 @@ int ObMySQLTransaction::enable_async(ObISQLClient *sql_client, const uint64_t te
   }
   enable_async_ = true;
 
-  async_trans_ = new ObMySQLTransaction();
+  async_trans_ = new ObMySQLTransaction(true);
   if (OB_FAIL(async_trans_->start(sql_client, tenant_id, false))) {
     LOG_WARN("fail to start async trans", KR(ret), K(tenant_id));
   }

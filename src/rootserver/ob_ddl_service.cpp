@@ -23722,11 +23722,6 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
     }
   }
   table_ids.insert(tmp_ids.begin(), tmp_ids.end());
-  // core table
-  if (OB_FAIL(batch_create_schema_local(tenant_id, this_round_tables, 0, this_round_tables.count(), true))) {
-    LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
-    return ret;
-  }
 
   // all other tables
   if (OB_FAIL(parallel_create_schemas(tenant_id, next_round_tables))) {
@@ -23734,10 +23729,16 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
     return ret;
   }
 
-  if (enable_meta_user_parallel_) {
-    ATOMIC_AAF(&meta_user_core_count_, 1);
-    while (ATOMIC_LOAD(&meta_user_core_count_) < 2);
+  // core table
+  if (OB_FAIL(batch_create_schema_local(tenant_id, this_round_tables, 0, this_round_tables.count(), true))) {
+    LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
+    return ret;
   }
+
+  // if (enable_meta_user_parallel_) {
+  //   ATOMIC_AAF(&meta_user_core_count_, 1);
+  //   while (ATOMIC_LOAD(&meta_user_core_count_) < 2);
+  // }
   
   // while (!flag) {
   //   flag = true;
