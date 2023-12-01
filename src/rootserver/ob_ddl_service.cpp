@@ -23668,6 +23668,7 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
 {
   int ret = OB_SUCCESS;
   
+  // ObSArray<uint64_t> schema_versions;
   ObSArray<ObTableSchema*> this_round_tables;
   ObSArray<ObTableSchema*> next_round_tables;
 
@@ -23676,7 +23677,30 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   // bool wait_for_sync = enable_meta_user_parallel_ && is_user_tenant(tenant_id);
   // bool generate_sync = enable_meta_user_parallel_ && is_meta_tenant(tenant_id);
 
-  bool flag = true;
+  std::unordered_map<uint64_t, ObTableSchema*> table_maps;
+  for (int i = 0; i < table_schemas.count(); i++) {
+    ObTableSchema &table = table_schemas.at(i);
+    int64_t new_schema_version;
+    if (OB_FAIL(schema_service_->gen_new_schema_version(tenant_id, new_schema_version))) {
+      LOG_WARN("fail to gen new schema_version", K(ret), K(tenant_id));
+    } else {
+      table.set_schema_version(new_schema_version);
+      table_maps.insert(std::make_pair(table.get_table_id(), &table));
+    }
+    bool has_dep = 
+      (table.is_index_table() || table.is_materialized_view() || table.is_aux_vp_table() || table.is_aux_lob_table()) &&
+      !(ObSysTableChecker::is_sys_table_index_tid(table.get_table_id()) || is_sys_lob_table(table.get_table_id()));
+    if (has_dep) {
+      ObTableSchema &data_table = *table_maps.find(table.get_data_table_id())->second;
+      if (OB_FAIL(schema_service_->gen_new_schema_version(tenant_id, new_schema_version))) {
+        LOG_WARN("fail to gen new schema_version", K(ret), K(tenant_id));
+      } else {
+        data_table.set_schema_version(new_schema_version);
+      }
+    }
+  }
+
+  // bool flag = true;
 
   std::unordered_set<uint64_t> tmp_ids;
   for (int i = 0; i < table_schemas.count(); i++) {
@@ -23686,7 +23710,7 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
       this_round_tables.push_back(&table);
     } else {
       // tmp_ids.insert(table.get_table_id());
-      flag = false;
+      // flag = false;
       next_round_tables.push_back(&table);
     }
   }
@@ -23697,40 +23721,46 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
     return ret;
   }
 
+  // all other tables
+  if (OB_FAIL(parallel_create_schemas(tenant_id, next_round_tables))) {
+    LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
+    return ret;
+  }
+
   // if (enable_meta_user_parallel_) {
   //   ATOMIC_AAF(&meta_user_core_count_, 1);
   //   while (ATOMIC_LOAD(&meta_user_core_count_) < 2);
   // }
   
-  while (!flag) {
-    flag = true;
-    ObSArray<ObTableSchema*> tmp_tables;
-    std::unordered_set<uint64_t> tmp_ids;
-    this_round_tables.reset(); this_round_tables.reuse();
-    for (int i = 0; i < next_round_tables.count(); i++) {
-      ObTableSchema &table = *next_round_tables.at(i);
-      bool has_dep = 
-        (table.is_index_table() || table.is_materialized_view() || table.is_aux_vp_table() || table.is_aux_lob_table()) &&
-        !(ObSysTableChecker::is_sys_table_index_tid(table.get_table_id()) || is_sys_lob_table(table.get_table_id()));
+  // while (!flag) {
+  //   flag = true;
+  //   ObSArray<ObTableSchema*> tmp_tables;
+  //   std::unordered_set<uint64_t> tmp_ids;
+  //   this_round_tables.reset(); this_round_tables.reuse();
+  //   for (int i = 0; i < next_round_tables.count(); i++) {
+  //     ObTableSchema &table = *next_round_tables.at(i);
+  //     bool has_dep = 
+  //       (table.is_index_table() || table.is_materialized_view() || table.is_aux_vp_table() || table.is_aux_lob_table()) &&
+  //       !(ObSysTableChecker::is_sys_table_index_tid(table.get_table_id()) || is_sys_lob_table(table.get_table_id()));
 
-      if (has_dep && table_ids.count(table.get_data_table_id()) == 0) {
-        flag = false;
-        tmp_tables.push_back(&table);
-      } else {
-        tmp_ids.insert(table.get_table_id());
-        this_round_tables.push_back(&table);
-      }
-    }
-    table_ids.insert(tmp_ids.begin(), tmp_ids.end());
+  //     if (has_dep && table_ids.count(table.get_data_table_id()) == 0) {
+  //       flag = false;
+  //       tmp_tables.push_back(&table);
+  //     } else {
+  //       tmp_ids.insert(table.get_table_id());
+  //       this_round_tables.push_back(&table);
+  //     }
+  //   }
+  //   table_ids.insert(tmp_ids.begin(), tmp_ids.end());
 
-    if (OB_FAIL(parallel_create_schemas(tenant_id, this_round_tables))) {
-      LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
-      return ret;
-    }
+  //   if (OB_FAIL(parallel_create_schemas(tenant_id, this_round_tables))) {
+  //     LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
+  //     return ret;
+  //   }
 
-    next_round_tables.reset(); next_round_tables.reuse();
-    next_round_tables.assign(tmp_tables);
-  }
+  //   next_round_tables.reset(); next_round_tables.reuse();
+  //   next_round_tables.assign(tmp_tables);
+  // }
 
   if (enable_meta_user_parallel_) {
     ATOMIC_AAF(&meta_user_core_count_, 1);

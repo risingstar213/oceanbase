@@ -6383,8 +6383,22 @@ int ObServerSchemaService::refresh_tenant_full_normal_schema(
                  schema_status, schema_version, non_sys_table_ids, sql_client,
                  allocator, non_sys_tables))) {
         LOG_WARN("get non core table schemas failed", KR(ret), K(schema_status), K(schema_version));
-      } else if (OB_FAIL(update_non_sys_schemas_in_cache_(*schema_mgr_for_cache, non_sys_tables))) {
-        LOG_WARN("update core and sys schemas in cache faield", KR(ret), K(schema_status));
+      } else {
+        // if (OB_FAIL(update_non_sys_schemas_in_cache_(*schema_mgr_for_cache, non_sys_tables))) {
+        //   LOG_WARN("update core and sys schemas in cache faield", KR(ret), K(schema_status));
+        // }
+
+        FOREACH_CNT_X(non_sys_table, non_sys_tables, OB_SUCC(ret)) {
+          if (OB_ISNULL(non_sys_table)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("NULL ptr", KP(non_sys_table), KR(ret));
+          } else if (OB_ISNULL(*non_sys_table)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("NULL ptr", KP(*non_sys_table), KR(ret));
+          } else if (OB_FAIL(add_aux_schema_from_mgr(*schema_mgr_for_cache, **non_sys_table, USER_INDEX))) {
+            LOG_WARN("fail to add aux schema", KR(ret), KPC(*non_sys_table));
+          }
+        }
       }
     }
   }

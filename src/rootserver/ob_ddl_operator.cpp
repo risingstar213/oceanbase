@@ -1558,7 +1558,7 @@ int ObDDLOperator::create_table_for_create_tenants(ObTableSchema &table_schema,
 {
   int ret = OB_SUCCESS;
   const uint64_t tenant_id = table_schema.get_tenant_id();
-  int64_t new_schema_version = OB_INVALID_VERSION;
+  // int64_t new_schema_version = OB_INVALID_VERSION;
   ObSchemaService *schema_service = schema_service_.get_schema_service();
   ObSchemaGetterGuard schema_guard;
   if (OB_ISNULL(schema_service)) {
@@ -1566,10 +1566,10 @@ int ObDDLOperator::create_table_for_create_tenants(ObTableSchema &table_schema,
     RS_LOG(ERROR, "schema_service must not null");
   } else if (OB_FAIL(schema_service_.get_tenant_schema_guard(tenant_id, schema_guard))) {
     LOG_WARN("failed to get schema guard", K(ret));
-  } else if (OB_FAIL(schema_service_.gen_new_schema_version(tenant_id, new_schema_version))) {
-    LOG_WARN("fail to gen new schema_version", K(ret), K(tenant_id));
+  // } else if (OB_FAIL(schema_service_.gen_new_schema_version(tenant_id, new_schema_version))) {
+  //   LOG_WARN("fail to gen new schema_version", K(ret), K(tenant_id));
   } else {
-    table_schema.set_schema_version(new_schema_version);
+    // table_schema.set_schema_version(new_schema_version);
     if (OB_FAIL(schema_service->get_table_sql_service().create_table_for_create_schemas(
         table_schema,
         trans,
@@ -1587,6 +1587,7 @@ int ObDDLOperator::create_table_for_create_tenants(ObTableSchema &table_schema,
   }
 
   // add audit in table if necessary
+  int64_t new_schema_version = OB_INVALID_VERSION;
   if (OB_SUCC(ret) && !is_truncate_table && (table_schema.is_user_table() || table_schema.is_external_table())) {
     const uint64_t tenant_id = table_schema.get_tenant_id();
     ObArray<const ObSAuditSchema *> audits;

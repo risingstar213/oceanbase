@@ -2841,17 +2841,17 @@ int ObTableSqlService::create_table_for_create_schemas(ObTableSchema &table,
     }
 
     if (OB_SUCC(ret)) {
-      LOG_DEBUG("add table", "table type", table.get_table_type(), "index type", table.get_index_type());
-      if ((table.is_index_table() || table.is_materialized_view() || table.is_aux_vp_table() || table.is_aux_lob_table()) && need_sync_schema_version) {
-        if (OB_FAIL(update_data_table_schema_version(sql_client, tenant_id,
-            table.get_data_table_id(), table.get_in_offline_ddl_white_list()))) {
-          LOG_WARN("fail to update schema_version", K(ret));
-        }
-        end_usec = ObTimeUtility::current_time();
-        cost_usec = end_usec - start_usec;
-        start_usec = end_usec;
-        LOG_INFO("update_data_table_schema_version cost: ", K(cost_usec));
-      }
+      // LOG_DEBUG("add table", "table type", table.get_table_type(), "index type", table.get_index_type());
+      // if ((table.is_index_table() || table.is_materialized_view() || table.is_aux_vp_table() || table.is_aux_lob_table()) && need_sync_schema_version) {
+      //   if (OB_FAIL(update_data_table_schema_version(sql_client, tenant_id,
+      //       table.get_data_table_id(), table.get_in_offline_ddl_white_list()))) {
+      //     LOG_WARN("fail to update schema_version", K(ret));
+      //   }
+      //   end_usec = ObTimeUtility::current_time();
+      //   cost_usec = end_usec - start_usec;
+      //   start_usec = end_usec;
+      //   LOG_INFO("update_data_table_schema_version cost: ", K(cost_usec));
+      // }
     }
   }
   return ret;
