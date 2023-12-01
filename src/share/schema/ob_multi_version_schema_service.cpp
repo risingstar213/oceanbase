@@ -2572,6 +2572,126 @@ int ObMultiVersionSchemaService::refresh_and_add_schema(const ObIArray<uint64_t>
   return ret;
 }
 
+int ObMultiVersionSchemaService::refresh_and_add_schema_with_ready_schemas(const common::ObIArray<uint64_t> &tenant_ids,
+                             common::ObIArray<ObTableSchema> &schemas_ready_to_refresh,
+                             bool check_bootstrap)
+{
+    FLOG_INFO("[REFRESH_SCHEMA] start to refresh and add schema", K(tenant_ids));
+  const int64_t start = ObTimeUtility::current_time();
+  int ret = OB_SUCCESS;
+  bool is_standby_cluster = GCTX.is_standby_cluster();
+  if (!check_inner_stat()) {
+    ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("inner stat error", K(ret));
+  } else {
+    lib::ObMutexGuard guard(schema_refresh_mutex_);
+    refresh_schema_with_ready_schemas_ = true;
+    schemas_ready_to_refresh_ = &schemas_ready_to_refresh;
+    auto func = [&]() {
+      ObSchemaStatusProxy *schema_status_proxy = GCTX.schema_status_proxy_;
+      // This is just to reduce SQL calls, the error code can be ignored
+      int tmp_ret = OB_SUCCESS;
+      bool restore_tenant_exist = false;
+      if (ObSchemaService::g_liboblog_mode_) {
+        // Avoid using schema_status_proxy for agentserver and liboblog
+        restore_tenant_exist = false;
+      } else if (OB_SUCCESS != (tmp_ret = check_restore_tenant_exist(tenant_ids, restore_tenant_exist))) {
+        LOG_WARN("fail to check restore tenant exist", K(ret), K(tmp_ret), K(tenant_ids));
+        restore_tenant_exist = true;
+      }
+      if (is_standby_cluster || restore_tenant_exist) {
+        if (OB_ISNULL(schema_status_proxy)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("schema_status_proxy is null", K(ret));
+        } else if (OB_FAIL(schema_status_proxy->load_refresh_schema_status())) {
+          LOG_WARN("fail to load refresh schema status", K(ret));
+        }
+      }
+
+      if (OB_FAIL(ret)) {
+      } else if (check_bootstrap) {
+        // The schema refresh triggered by the heartbeat is forbidden in the bootstrap phase,
+        // and it needs to be judged in the schema_refresh_mutex_lock
+        //
+        int64_t baseline_schema_version = OB_INVALID_VERSION;
+        if (OB_FAIL(get_baseline_schema_version(OB_SYS_TENANT_ID, true/*auto_update*/, baseline_schema_version))) {
+          LOG_WARN("fail to get baseline_schema_version", K(ret));
+        } else if (baseline_schema_version < 0) {
+          // still in bootstrap phase, refresh schema is not allowed
+          ret = OB_OP_NOT_ALLOW;
+          LOG_WARN("refresh schema in bootstrap phase is not allowed", K(ret));
+        }
+      }
+
+      // Ensure that the memory on the stack requested during the refresh schema process also uses the default 500 tenant
+      ObArenaAllocator allocator(ObModIds::OB_MODULE_PAGE_ALLOCATOR, OB_MALLOC_BIG_BLOCK_SIZE, OB_SERVER_TENANT_ID);
+      ObSchemaStackAllocatorGuard guard(&allocator);
+
+      ObArray<uint64_t> all_tenant_ids;
+      if (OB_FAIL(ret)) {
+      } else if (0 == tenant_ids.count()) {
+        // refresh all tenant schema
+        ObSchemaMgr *schema_mgr = NULL;
+        if (OB_FAIL(refresh_tenant_schema(OB_SYS_TENANT_ID))) {
+          LOG_WARN("fail to refresh sys schema", K(ret), K(all_tenant_ids));
+        } else if (OB_FAIL(schema_mgr_for_cache_map_.get_refactored(OB_SYS_TENANT_ID, schema_mgr))) {
+          LOG_WARN("fail to get sys schema mgr for cache", K(ret));
+        } else if (OB_ISNULL(schema_mgr)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("schema_mgr is null", K(ret));
+        } else if (OB_FAIL(schema_mgr->get_tenant_ids(all_tenant_ids))) {
+          LOG_WARN("fail to get all tenant_ids", K(ret));
+        } else {
+          // Ignore that some tenants fail to refresh the schema,
+          // and need to report an error to the upper layer to avoid pushing up last_refresh_schema_info
+          int tmp_ret = OB_SUCCESS;
+          for (int64_t i = 0; i < all_tenant_ids.count(); i++) {
+            const uint64_t tenant_id = all_tenant_ids.at(i);
+            if (OB_SYS_TENANT_ID == tenant_id) {
+              // skip
+            } else if (OB_SUCCESS != (tmp_ret = refresh_tenant_schema(tenant_id))) {
+              LOG_WARN("fail to refresh tenant schema", K(tmp_ret), K(tenant_id));
+            }
+            if (OB_SUCCESS != tmp_ret && OB_SUCCESS == ret) {
+              ret = tmp_ret;
+            }
+          }
+        }
+      } else {
+        // Ignore that some tenants fail to refresh the schema,
+        // and need to report an error to the upper layer to avoid pushing up last_refresh_schema_info
+        int tmp_ret = OB_SUCCESS;
+        for (int64_t i = 0; i < tenant_ids.count(); i++) {
+          const uint64_t tenant_id = tenant_ids.at(i);
+          if (OB_INVALID_TENANT_ID == tenant_id) {
+            tmp_ret = OB_INVALID_ARGUMENT;
+            LOG_WARN("invalid tenant_id", K(tmp_ret), K(tenant_id));
+          } else if (OB_SUCCESS != (tmp_ret = refresh_tenant_schema(tenant_id))) {
+            LOG_WARN("fail to refresh tenant schema", K(tmp_ret), K(tenant_id));
+          }
+          if (OB_SUCCESS != tmp_ret && OB_SUCCESS == ret) {
+            ret = tmp_ret;
+          }
+        }
+      }
+    };
+    CREATE_WITH_TEMP_ENTITY_P(!ObSchemaService::g_liboblog_mode_, RESOURCE_OWNER, common::OB_SERVER_TENANT_ID)
+    {
+      func();
+    } else {
+      // Two aspects are considered, one is that there is no omt module in one side,
+      // and the other is that the tenant has not been loaded during the omt startup phase.
+      func();
+    }
+
+    refresh_schema_with_ready_schemas_ = false;
+    schemas_ready_to_refresh_ = nullptr;
+  }
+  FLOG_INFO("[REFRESH_SCHEMA] end refresh and add schema", KR(ret), K(tenant_ids),
+            "cost", ObTimeUtility::current_time() - start);
+  return ret;
+}
+
 // It is used to determine the initial Partition set when liboblog starts, and obtain the maximum schema_version
 // that meets the requirements of <=timestamp. The schema_version should be as large as possible;
 // it is also used for schema history recycle

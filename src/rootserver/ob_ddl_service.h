@@ -961,6 +961,7 @@ int check_table_udt_id_is_exist(share::schema::ObSchemaGetterGuard &schema_guard
 
   // refresh local schema busy wait
   virtual int refresh_schema(const uint64_t tenant_id, int64_t *schema_version = NULL);
+  virtual int refresh_schema_with_ready_schemas(const uint64_t tenant_id, common::ObIArray<ObTableSchema> &schemas_ready_to_refresh, int64_t *schema_version = NULL);
   // notify other servers to refresh schema (call switch_schema  rpc)
   virtual int notify_refresh_schema(const common::ObAddrIArray &addrs);
 

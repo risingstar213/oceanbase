@@ -1207,6 +1207,8 @@ protected:
       const uint64_t tenant_id,
       const AllSchemaKeys &schema_keys,
       common::ObIArray<const ObTableSchema *> &table_schemas);
+  int get_core_table_schemas_from_ready_schemas(ObArray<ObTableSchema> &core_schemas);
+  int get_table_schemas_from_ready_schemas(const common::ObIArray<uint64_t> &table_ids, ObArray<ObTableSchema *> &schemas);
 protected:
   // core table count
   const static int64_t MIN_TABLE_COUNT = 1;
@@ -1233,6 +1235,8 @@ protected:
   common::hash::ObHashMap<uint64_t, ObSchemaMgr*, common::hash::ReadWriteDefendMode> schema_mgr_for_cache_map_;
   common::hash::ObHashMap<uint64_t, ObSchemaMemMgr*, common::hash::ReadWriteDefendMode> mem_mgr_map_;
   common::hash::ObHashMap<uint64_t, ObSchemaMemMgr*, common::hash::ReadWriteDefendMode> mem_mgr_for_liboblog_map_;
+  bool refresh_schema_with_ready_schemas_ = false;
+  common::ObIArray<ObTableSchema> *schemas_ready_to_refresh_ = nullptr;
 };
 
 template<typename SchemaKeys>

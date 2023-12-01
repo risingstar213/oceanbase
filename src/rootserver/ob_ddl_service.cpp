@@ -22011,7 +22011,7 @@ int ObDDLService::create_tenant(
         LOG_WARN("get_pools failed", KR(ret), K(arg));
       }
 
-      enable_meta_user_parallel_ = false;
+      enable_meta_user_parallel_ = true;
       ATOMIC_SET(&meta_user_parallel_sync_, false);
       ATOMIC_SET(&meta_user_core_count_, 0);
 
@@ -23294,8 +23294,15 @@ int ObDDLService::init_tenant_schema(
         LOG_WARN("fail to get sys ls info by operator", KR(ret), K(tenant_id));
       } else if (OB_FAIL(sys_ls_info.get_paxos_member_addrs(addrs))) {
         LOG_WARN("fail to get paxos member addrs", K(ret), K(tenant_id), K(sys_ls_info));
-      } else if (OB_FAIL(publish_schema(tenant_id, addrs))) {
-        LOG_WARN("fail to publish schema", KR(ret), K(tenant_id), K(addrs));
+      // } else if (OB_FAIL(publish_schema(tenant_id, addrs))) {
+      //   LOG_WARN("fail to publish schema", KR(ret), K(tenant_id), K(addrs));
+      // }
+      } else {
+        if (OB_FAIL(refresh_schema_with_ready_schemas(tenant_id, tables))) {
+          LOG_WARN("refresh schema failed", K(ret));
+        } else if (OB_FAIL(notify_refresh_schema(addrs))) {
+          LOG_WARN("notify refresh schema failed", K(ret));
+        }
       }
     }
 
@@ -23762,10 +23769,10 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   //   next_round_tables.assign(tmp_tables);
   // }
 
-  if (enable_meta_user_parallel_) {
-    ATOMIC_AAF(&meta_user_core_count_, 1);
-    while (ATOMIC_LOAD(&meta_user_core_count_) < 2);
-  }
+  // if (enable_meta_user_parallel_) {
+  //   ATOMIC_AAF(&meta_user_core_count_, 1);
+  //   while (ATOMIC_LOAD(&meta_user_core_count_) < 2);
+  // }
 
   // LOG_INFO("end parallel process");
 
@@ -26910,6 +26917,85 @@ int ObDDLService::refresh_schema(uint64_t tenant_id, int64_t *publish_schema_ver
         break;
       } else {
         ret = schema_service_->refresh_and_add_schema(tenant_ids);
+      }
+
+      if (OB_SUCC(ret)) {
+        break;
+      } else {
+        int tmp_ret = OB_SUCCESS;
+        bool is_dropped = false;
+        if (OB_TMP_FAIL(check_tenant_has_been_dropped_(tenant_id, is_dropped))) {
+          LOG_WARN("fail to check if tenant has been dropped", KR(ret), K(tmp_ret), K(tenant_id));
+        } else if (is_dropped) {
+          LOG_WARN("tenant has been dropped, just exit", KR(ret), K(tenant_id));
+          break;
+        }
+        ++refresh_count;
+        LOG_WARN("refresh schema failed", KR(ret), K(tenant_id), K(refresh_count),
+                                          "refresh_schema_interval", static_cast<int64_t>(REFRESH_SCHEMA_INTERVAL_US));
+        if (refresh_count > 2 && REACH_TIME_INTERVAL(10 * 60 * 1000 * 1000L)) { // 10 min
+          LOG_DBA_ERROR(OB_ERR_REFRESH_SCHEMA_TOO_LONG,
+                        "msg", "refresh schema failed", KR(ret), K(refresh_count));
+        }
+        ob_usleep(REFRESH_SCHEMA_INTERVAL_US);
+      }
+    }
+    if (OB_SUCC(ret) && !stopped_) {
+      int64_t schema_version = OB_INVALID_VERSION;
+      if (OB_FAIL(schema_service_->get_tenant_refreshed_schema_version(
+                         tenant_id, schema_version))) {
+        LOG_WARN("fail to get tenant refreshed schema version", KR(ret), K(tenant_id));
+      } else {
+        ObSchemaService *schema_service = schema_service_->get_schema_service();
+        ObRefreshSchemaInfo schema_info;
+        schema_info.set_tenant_id(tenant_id);
+        schema_info.set_schema_version(schema_version);
+        if (OB_ISNULL(schema_service)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("schema_service is null", K(ret));
+        } else if (OB_FAIL(schema_service->inc_sequence_id())) {
+          LOG_WARN("increase sequence_id failed", K(ret));
+        } else if (OB_FAIL(schema_service->set_refresh_schema_info(schema_info))) {
+          LOG_WARN("fail to set refresh schema info", KR(ret), K(schema_info));
+        } else if (OB_NOT_NULL(publish_schema_version)) {
+          *publish_schema_version = schema_version;
+        }
+      }
+    }
+    if (OB_FAIL(ret) && stopped_) {
+      ret = OB_CANCELED;
+      LOG_WARN("rs is stopped", KR(ret), K(tenant_id));
+    }
+    THIS_WORKER.set_timeout_ts(original_timeout_us);
+  }
+
+  return ret;
+}
+
+int ObDDLService::refresh_schema_with_ready_schemas(uint64_t tenant_id, common::ObIArray<ObTableSchema> &schemas_ready_to_refresh, int64_t *publish_schema_version /*NULL*/)
+{
+  int ret = OB_SUCCESS;
+  int64_t refresh_count = 0;
+  if (OB_FAIL(check_inner_stat())) {
+    LOG_WARN("variable is not init");
+  } else {
+    int64_t original_timeout_us = THIS_WORKER.get_timeout_ts();
+    // refresh schema will retry to success, so ignore the DDL request timeout.
+    THIS_WORKER.set_timeout_ts(INT64_MAX);
+    ObArray<uint64_t> tenant_ids;
+    if (OB_INVALID_TENANT_ID == tenant_id) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("invalid tenant_id", K(ret));
+    } else if (OB_FAIL(tenant_ids.push_back(tenant_id))) {
+      LOG_WARN("fail to push back tenant_id", KR(ret), K(tenant_id));
+    }
+    while (!stopped_) {
+      common::ObTimeoutCtx ctx;
+      if (OB_FAIL(schema_service_->set_timeout_ctx(ctx))) {
+        LOG_ERROR("fail to set timeout_ctx, refresh schema failed", KR(ret), K(tenant_id));
+        break;
+      } else {
+        ret = schema_service_->refresh_and_add_schema_with_ready_schemas(tenant_ids, schemas_ready_to_refresh);
       }
 
       if (OB_SUCC(ret)) {

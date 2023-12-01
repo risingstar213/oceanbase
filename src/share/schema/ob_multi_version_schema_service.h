@@ -352,6 +352,10 @@ public:
   // new schema refresh interface
   int refresh_and_add_schema(const common::ObIArray<uint64_t> &tenant_ids,
                              bool check_bootstrap = false);
+  
+  int refresh_and_add_schema_with_ready_schemas(const common::ObIArray<uint64_t> &tenant_ids,
+                             common::ObIArray<ObTableSchema> &schemas_ready_to_refresh,
+                             bool check_bootstrap = false);
   // Trigger an asynchronous refresh task and wait for the refresh result
   int async_refresh_schema(const uint64_t tenant_id,
                            const int64_t schema_version);

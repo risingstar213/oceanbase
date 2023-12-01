@@ -34,6 +34,8 @@
 #include "observer/ob_server_struct.h"
 #include "share/ob_schema_status_proxy.h"
 #include "share/ob_global_stat_proxy.h"
+
+#include <unordered_set>
 namespace oceanbase
 {
 namespace share
@@ -5805,6 +5807,22 @@ int ObServerSchemaService::set_timeout_ctx(ObTimeoutCtx &ctx)
   return ret;
 }
 
+int ObServerSchemaService::get_core_table_schemas_from_ready_schemas(ObArray<ObTableSchema> &core_schemas)
+{
+  int ret = OB_SUCCESS;
+  if (!refresh_schema_with_ready_schemas_ || nullptr == schemas_ready_to_refresh_) {
+    ret = OB_UNEXPECT_INTERNAL_ERROR;
+  } else {
+    for (int i = 0; i < schemas_ready_to_refresh_->count(); i++) {
+      ObTableSchema &table = schemas_ready_to_refresh_->at(i);
+      if (is_core_table(table.get_table_id())) {
+        core_schemas.push_back(table);
+      }
+    }
+  }
+  return ret;
+}
+
 int ObServerSchemaService::try_fetch_publish_core_schemas(
     const ObRefreshSchemaStatus &schema_status,
     const int64_t core_schema_version,
@@ -5823,9 +5841,17 @@ int ObServerSchemaService::try_fetch_publish_core_schemas(
   } else {
     ObArray<ObTableSchema> core_schemas;
     ObArray<uint64_t> core_table_ids;
-    if (OB_FAIL(schema_service_->get_core_table_schemas(
-        sql_client, schema_status, core_schemas))) {
-      LOG_WARN("get_core_table_schemas failed", KR(ret), K(schema_status), K(core_table_ids));
+    if (false) {
+      if (OB_FAIL(get_core_table_schemas_from_ready_schemas(core_schemas))) {
+        LOG_WARN("get_core_table_schemas failed", KR(ret), K(schema_status), K(core_table_ids));
+      }
+    } else {
+      if (OB_FAIL(schema_service_->get_core_table_schemas(
+          sql_client, schema_status, core_schemas))) {
+        LOG_WARN("get_core_table_schemas failed", KR(ret), K(schema_status), K(core_table_ids));
+      }
+    }
+    if (OB_FAIL(ret)) {
     } else if (OB_FAIL(check_core_schema_change_(sql_client, schema_status,
                core_schema_version, core_schema_change))) {
        LOG_WARN("fail to check core schema version change", KR(ret), K(schema_status), K(core_schema_version));
@@ -5875,6 +5901,26 @@ int ObServerSchemaService::try_fetch_publish_core_schemas(
   return ret;
 }
 
+int ObServerSchemaService::get_table_schemas_from_ready_schemas(const common::ObIArray<uint64_t> &table_ids, ObArray<ObTableSchema *> &schemas)
+{
+  int ret = OB_SUCCESS;
+  std::unordered_set<uint64_t> table_ids_set;
+  if (!refresh_schema_with_ready_schemas_ || nullptr == schemas_ready_to_refresh_) {
+    ret = OB_UNEXPECT_INTERNAL_ERROR;
+  } else {
+    for (int i = 0; i < table_ids.count(); i++) {
+      table_ids_set.insert(table_ids.at(i));
+    }
+    for (int i = 0; i < schemas_ready_to_refresh_->count(); i++) {
+      ObTableSchema &table = schemas_ready_to_refresh_->at(i);
+      if (table_ids_set.count(table.get_table_id())) {
+        schemas.push_back(&table);
+      }
+    }
+  }
+  return ret;
+}
+
 int ObServerSchemaService::try_fetch_publish_sys_schemas(
     const ObRefreshSchemaStatus &schema_status,
     const int64_t schema_version,
@@ -5897,9 +5943,19 @@ int ObServerSchemaService::try_fetch_publish_sys_schemas(
     int64_t new_schema_version = 0;
     if (OB_FAIL(get_sys_table_ids(tenant_id, sys_table_ids))) {
       LOG_WARN("get sys table ids failed", KR(ret), K(schema_status));
-    } else if (OB_FAIL(schema_service_->get_sys_table_schemas(
-               sql_client, schema_status, sys_table_ids, allocator, sys_schemas))) {
-      LOG_WARN("get_batch_table_schema failed", KR(ret), K(schema_status), K(sys_table_ids));
+    } else {
+      if (refresh_schema_with_ready_schemas_) {
+        if (OB_FAIL(get_table_schemas_from_ready_schemas(sys_table_ids, sys_schemas))) {
+          LOG_WARN("get_batch_table_schema failed", KR(ret), K(schema_status), K(sys_table_ids));
+        }
+      } else {
+        if (OB_FAIL(schema_service_->get_sys_table_schemas(
+                  sql_client, schema_status, sys_table_ids, allocator, sys_schemas))) {
+          LOG_WARN("get_batch_table_schema failed", KR(ret), K(schema_status), K(sys_table_ids));
+        }
+      }
+    }
+    if (OB_FAIL(ret)) {
     } else if (OB_FAIL(get_schema_version_in_inner_table(sql_client, schema_status, new_schema_version))) {
       LOG_WARN("fail to get schema version in inner table", KR(ret), K(schema_status));
     } else if (OB_FAIL(check_sys_schema_change(sql_client,
@@ -6379,10 +6435,20 @@ int ObServerSchemaService::refresh_tenant_full_normal_schema(
       ObArray<ObTableSchema *> non_sys_tables;
       if (OB_FAIL(schema_mgr_for_cache->get_non_sys_table_ids(tenant_id, non_sys_table_ids))) {
         LOG_WARN("fail to get non sys table_ids", KR(ret), K(schema_status));
-      } else if (OB_FAIL(schema_service_->get_batch_table_schema(
-                 schema_status, schema_version, non_sys_table_ids, sql_client,
-                 allocator, non_sys_tables))) {
-        LOG_WARN("get non core table schemas failed", KR(ret), K(schema_status), K(schema_version));
+      } else {
+        if (refresh_schema_with_ready_schemas_) {
+          if (OB_FAIL(get_table_schemas_from_ready_schemas(non_sys_table_ids, non_sys_tables))) {
+            LOG_WARN("get non core table schemas failed", KR(ret), K(schema_status), K(schema_version));
+          }
+        } else {
+          if (OB_FAIL(schema_service_->get_batch_table_schema(
+                    schema_status, schema_version, non_sys_table_ids, sql_client,
+                    allocator, non_sys_tables))) {
+            LOG_WARN("get non core table schemas failed", KR(ret), K(schema_status), K(schema_version));
+          }
+        }
+      }
+      if (OB_FAIL(ret)) {
       } else {
         // if (OB_FAIL(update_non_sys_schemas_in_cache_(*schema_mgr_for_cache, non_sys_tables))) {
         //   LOG_WARN("update core and sys schemas in cache faield", KR(ret), K(schema_status));
