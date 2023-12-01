@@ -5815,7 +5815,7 @@ int ObServerSchemaService::get_core_table_schemas_from_ready_schemas(ObArray<ObT
   } else {
     for (int i = 0; i < schemas_ready_to_refresh_->count(); i++) {
       ObTableSchema &table = schemas_ready_to_refresh_->at(i);
-      if (is_core_table(table.get_table_id())) {
+      if ((table.get_table_id() > 1) && is_core_table(table.get_table_id())) {
         core_schemas.push_back(table);
       }
     }
@@ -5841,7 +5841,7 @@ int ObServerSchemaService::try_fetch_publish_core_schemas(
   } else {
     ObArray<ObTableSchema> core_schemas;
     ObArray<uint64_t> core_table_ids;
-    if (false) {
+    if (refresh_schema_with_ready_schemas_) {
       if (OB_FAIL(get_core_table_schemas_from_ready_schemas(core_schemas))) {
         LOG_WARN("get_core_table_schemas failed", KR(ret), K(schema_status), K(core_table_ids));
       }
@@ -6058,6 +6058,29 @@ int ObServerSchemaService::add_sys_variable_schema_to_cache(
   return ret;
 }
 
+int ObServerSchemaService::get_simple_schemas_from_ready_schemas(ObArenaAllocator &allocator, common::ObIArray<ObSimpleTableSchemaV2 *> &schema_array)
+{
+  int ret = OB_SUCCESS;
+  if (!refresh_schema_with_ready_schemas_ || nullptr == schemas_ready_to_refresh_) {
+    ret = OB_UNEXPECT_INTERNAL_ERROR;
+  } else {
+    for (int i = 0; i < schemas_ready_to_refresh_->count(); i++) {
+      ObTableSchema &table = schemas_ready_to_refresh_->at(i);
+      ObSimpleTableSchemaV2 *simple_schema = NULL;
+      if ((table.get_table_id() > 1)) {
+        if (OB_FAIL(ObSchemaUtils::alloc_schema(allocator, simple_schema))) {
+          LOG_WARN("fail to alloc simple schema", KR(ret));
+        } else if (OB_FAIL(convert_to_simple_schema(table, *simple_schema))) {
+          LOG_WARN("convert failed", KR(ret));
+        } else if (OB_FAIL(schema_array.push_back(simple_schema))) {
+          LOG_WARN("push back failed", KR(ret));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 // new schema full refresh
 int ObServerSchemaService::refresh_tenant_full_normal_schema(
     ObISQLClient &sql_client,
@@ -6207,9 +6230,19 @@ int ObServerSchemaService::refresh_tenant_full_normal_schema(
       } else if (OB_FAIL(schema_service_->get_all_tablegroups(
           sql_client, schema_status, schema_version, tenant_id, simple_tablegroups))) {
         LOG_WARN("get all tablegroups failed", K(ret), K(schema_version), K(tenant_id));
-      } else if (OB_FAIL(schema_service_->get_all_tables(
-          sql_client, allocator, schema_status, schema_version, tenant_id, simple_tables))) {
-        LOG_WARN("get all table schema failed", KR(ret), K(schema_version), K(tenant_id));
+      } else {
+        if (refresh_schema_with_ready_schemas_) {
+          if (OB_FAIL(get_simple_schemas_from_ready_schemas(allocator, simple_tables))) {
+            LOG_WARN("get all table schema failed", KR(ret), K(schema_version), K(tenant_id));
+          }
+        } else {
+          if (OB_FAIL(schema_service_->get_all_tables(
+              sql_client, allocator, schema_status, schema_version, tenant_id, simple_tables))) {
+            LOG_WARN("get all table schema failed", KR(ret), K(schema_version), K(tenant_id));
+          }
+        }
+      }
+      if (OB_FAIL(ret)) {
       } else if (OB_FAIL(schema_service_->get_all_outlines(
           sql_client, schema_status, schema_version, tenant_id, simple_outlines))) {
         LOG_WARN("get all outline schema failed", K(ret), K(schema_version), K(tenant_id));

@@ -1209,6 +1209,8 @@ protected:
       common::ObIArray<const ObTableSchema *> &table_schemas);
   int get_core_table_schemas_from_ready_schemas(ObArray<ObTableSchema> &core_schemas);
   int get_table_schemas_from_ready_schemas(const common::ObIArray<uint64_t> &table_ids, ObArray<ObTableSchema *> &schemas);
+
+  int get_simple_schemas_from_ready_schemas(ObArenaAllocator &allocator, common::ObIArray<ObSimpleTableSchemaV2 *> &schema_array);
 protected:
   // core table count
   const static int64_t MIN_TABLE_COUNT = 1;
