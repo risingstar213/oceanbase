@@ -46,7 +46,7 @@ def __try_to_connect(host, mysql_port:int, *, timeout_seconds=60):
             return mysql.connect(host=host, user="root", port=mysql_port, passwd="")
         except mysql.err.Error as error:
             error_return = error
-            time.sleep(1)
+            time.sleep(0.1)
 
     _logger.info('failed to connect to observer fater %f seconds', timeout_seconds)
     raise error_return
