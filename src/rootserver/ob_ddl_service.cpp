@@ -23398,9 +23398,8 @@ int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTable
   } else {
     ObDDLOperator ddl_operator(get_schema_service(), get_sql_proxy());
     // for test
-    ObDDLSQLTransaction trans(schema_service_, true, true, false, false);
-    int64_t refreshed_schema_version = 0;
-    if (OB_FAIL(trans.start(sql_proxy_, tenant_id, refreshed_schema_version))) {
+    ObMySQLTransaction trans(true);
+    if (OB_FAIL(trans.start(sql_proxy_, tenant_id))) {
       LOG_WARN("start transaction failed", KR(ret));
     } else if (!core_table && OB_FAIL(trans.enable_async(sql_proxy_, tenant_id))) {
       LOG_WARN("enable async failed", KR(ret));
