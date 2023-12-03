@@ -86,6 +86,11 @@ int ObInMemoryLSTable::get(
   return ret;
 }
 
+bool ObInMemoryLSTable::replica_is_empty()
+{
+  return (ls_info_.get_replicas().count() == 0);
+}
+
 // get each replica from ls_info_ and deal with flag replica
 int ObInMemoryLSTable::inner_get_(
     const uint64_t tenant_id,

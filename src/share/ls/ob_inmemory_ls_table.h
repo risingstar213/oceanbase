@@ -73,6 +73,8 @@ public:
       const ObAddr &server,
       const bool inner_table_only) override;
 
+  bool replica_is_empty();
+
 private:
   // the real action to read LSinfo directly from memory
   // @parma [in] tenant_id, get whose ls info

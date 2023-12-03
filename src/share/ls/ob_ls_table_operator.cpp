@@ -215,7 +215,12 @@ int ObLSTableOperator::get_ls_table_(
     LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(ls_id));
   } else if (!inner_table_only && is_sys_tenant(tenant_id)) {
     if (GCONF.cluster_id == cluster_id) {
-      ls_table = root_ls_;
+      // temporarily
+      if (rpc_ls_.is_inited() && inmemory_ls_.replica_is_empty()) {
+        ls_table = static_cast<ObLSTable *>(&rpc_ls_);
+      } else {
+        ls_table = root_ls_;
+      }
     } else {
       //get rs_list from remote cluster must use rpc_ls_operator
       //can not get rs_list of remote cluster in inmemory

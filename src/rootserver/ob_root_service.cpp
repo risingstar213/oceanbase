@@ -4983,14 +4983,20 @@ int ObRootService::do_restart()
     FLOG_WARN("not master", KR(ret));
   }
 
+  bool exist = false;
+  if (OB_FAIL(schema_service_->check_table_exist(OB_SYS_TENANT_ID, OB_ALL_CORE_TABLE_TID, OB_INVALID_VERSION, exist))) {
+    FLOG_WARN("check table exist failed", KR(ret));
+  }
+
+  if (!exist) {
+    ret = OB_NEED_WAIT;
+    FLOG_WARN("restart in bootstrap, need retry", KR(ret));
+  }
+
   // renew master rootservice, ignore error
   if (OB_SUCC(ret)) {
     int tmp_ret = rs_mgr_->renew_master_rootserver();
-    if (OB_RS_NOT_MASTER == tmp_ret) {
-      // OB_RS_NOT_MASTER cannot be ignored !!!
-      ret = tmp_ret;
-      FLOG_WARN("renew master rootservice failed", KR(tmp_ret));
-    } else if (OB_SUCCESS != tmp_ret) {
+    if (OB_SUCCESS != tmp_ret) {
       FLOG_WARN("renew master rootservice failed", KR(tmp_ret));
     }
   }
