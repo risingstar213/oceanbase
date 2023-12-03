@@ -159,6 +159,8 @@ private:
       ObTableCreator &creator,
       const share::schema_create_func func);
   virtual int create_all_partitions();
+  virtual int create_partitions_with_dep();
+  virtual int create_partitions_without_dep();
   virtual int create_all_core_table_partition();
   virtual int construct_schema(
       const share::schema_create_func func,

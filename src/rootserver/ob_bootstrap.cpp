@@ -56,6 +56,8 @@
 #include "share/scn.h"
 #include "rootserver/ob_heartbeat_service.h"
 #include "rootserver/ob_root_service.h"
+
+#include <thread>
 #ifdef OB_BUILD_TDE_SECURITY
 #include "close_modules/tde_security/share/ob_master_key_getter.h"
 #endif
@@ -574,10 +576,30 @@ int ObBootstrap::execute_bootstrap(rootserver::ObServerZoneOpService &server_zon
     LOG_WARN("construct all schema fail", K(ret));
   } else if (OB_FAIL(broadcast_sys_schema(table_schemas))) {
     LOG_WARN("broadcast_sys_schemas failed", K(table_schemas), K(ret));
-  } else if (OB_FAIL(create_all_partitions())) {
+  } else if (OB_FAIL(create_partitions_with_dep())) {
     LOG_WARN("create all partitions fail", K(ret));
-  } else if (OB_FAIL(create_all_schema(ddl_service_, table_schemas))) {
-    LOG_WARN("create_all_schema failed",  K(table_schemas), K(ret));
+  } else {
+    int th_ret1;
+    ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
+    std::thread th1([&]() {
+      int ret = OB_SUCCESS;
+      set_thread_name("create_other_partition");
+      ObCurTraceId::set(*cur_trace_id);
+      if (OB_FAIL(create_partitions_without_dep())) {
+        LOG_WARN("create all partitions fail", K(ret));
+      }
+
+      ATOMIC_SET(&th_ret1, ret);
+    });
+
+    if (OB_FAIL(create_all_schema(ddl_service_, table_schemas))) {
+      LOG_WARN("create_all_schema failed",  K(table_schemas), K(ret));
+    }
+
+    th1.join();
+    if (OB_SUCC(ret)) {
+      ret = th_ret1;
+    }
   }
   BOOTSTRAP_CHECK_SUCCESS_V2("create_all_schema");
   ObMultiVersionSchemaService &schema_service = ddl_service_.get_schema_service();
@@ -814,6 +836,102 @@ int ObBootstrap::create_all_partitions()
       for (int64_t i = 0; OB_SUCC(ret) && NULL != sys_table_schema_creators[i]; ++i) {
         if (OB_FAIL(prepare_create_partition(
             table_creator, sys_table_schema_creators[i]))) {
+          LOG_WARN("prepare create partition fail", K(ret));
+        }
+      }
+      // execute creating tablet
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(table_creator.execute())) {
+          LOG_WARN("execute create partition failed", K(ret));
+        }
+      }
+    }
+    if (trans.is_started()) {
+      int temp_ret = OB_SUCCESS;
+      bool commit = OB_SUCC(ret);
+      if (OB_SUCCESS != (temp_ret = trans.end(commit))) {
+        ret = (OB_SUCC(ret)) ? temp_ret : ret;
+        LOG_WARN("trans end failed", K(commit), K(temp_ret));
+      }
+    }
+  }
+
+  LOG_INFO("finish creating system tables", K(ret));
+  BOOTSTRAP_CHECK_SUCCESS();
+  return ret;
+}
+
+int ObBootstrap::create_partitions_with_dep()
+{
+  int ret = OB_SUCCESS;
+  ObArray<uint64_t> sys_table_ids;
+  ObArray<int64_t> partition_nums;
+
+  if (OB_FAIL(check_inner_stat())) {
+    LOG_WARN("check_inner_stat failed", K(ret));
+  } else {
+    ObMySQLTransaction trans;
+    ObMySQLProxy &sql_proxy = ddl_service_.get_sql_proxy();
+    ObTableCreator table_creator(OB_SYS_TENANT_ID,
+                                 SCN::base_scn(),
+                                 trans);
+    if (OB_FAIL(trans.start(&sql_proxy, OB_SYS_TENANT_ID))) {
+      LOG_WARN("fail to start trans", KR(ret));
+    } else if (OB_FAIL(table_creator.init(false/*need_tablet_cnt_check*/))) {
+      LOG_WARN("fail to init tablet creator", KR(ret));
+    } else {
+      // create dep table partition
+      for (int64_t i = 0; OB_SUCC(ret) && NULL != before_create_creators[i]; ++i) {
+        if (OB_FAIL(prepare_create_partition(
+            table_creator, before_create_creators[i]))) {
+          LOG_WARN("prepare create partition fail", K(ret));
+        }
+      }
+      // execute creating tablet
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(table_creator.execute())) {
+          LOG_WARN("execute create partition failed", K(ret));
+        }
+      }
+    }
+    if (trans.is_started()) {
+      int temp_ret = OB_SUCCESS;
+      bool commit = OB_SUCC(ret);
+      if (OB_SUCCESS != (temp_ret = trans.end(commit))) {
+        ret = (OB_SUCC(ret)) ? temp_ret : ret;
+        LOG_WARN("trans end failed", K(commit), K(temp_ret));
+      }
+    }
+  }
+
+  LOG_INFO("finish creating system tables", K(ret));
+  BOOTSTRAP_CHECK_SUCCESS();
+  return ret;
+}
+
+int ObBootstrap::create_partitions_without_dep()
+{
+  int ret = OB_SUCCESS;
+  ObArray<uint64_t> sys_table_ids;
+  ObArray<int64_t> partition_nums;
+
+  if (OB_FAIL(check_inner_stat())) {
+    LOG_WARN("check_inner_stat failed", K(ret));
+  } else {
+    ObMySQLTransaction trans;
+    ObMySQLProxy &sql_proxy = ddl_service_.get_sql_proxy();
+    ObTableCreator table_creator(OB_SYS_TENANT_ID,
+                                 SCN::base_scn(),
+                                 trans);
+    if (OB_FAIL(trans.start(&sql_proxy, OB_SYS_TENANT_ID))) {
+      LOG_WARN("fail to start trans", KR(ret));
+    } else if (OB_FAIL(table_creator.init(false/*need_tablet_cnt_check*/))) {
+      LOG_WARN("fail to init tablet creator", KR(ret));
+    } else {
+      // create other table partition
+      for (int64_t i = 0; OB_SUCC(ret) && NULL != after_create_creators[i]; ++i) {
+        if (OB_FAIL(prepare_create_partition(
+            table_creator, after_create_creators[i]))) {
           LOG_WARN("prepare create partition fail", K(ret));
         }
       }
