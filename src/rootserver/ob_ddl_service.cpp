@@ -22978,6 +22978,13 @@ int ObDDLService::create_tenant_sys_tablets(
   const int64_t start_time = ObTimeUtility::fast_current_time();
   LOG_INFO("[CREATE_TENANT] STEP 2.3. start create sys table tablets", K(tenant_id));
   int ret = OB_SUCCESS;
+  std::unordered_map<uint64_t, ObTableSchema *> tables_map;
+  for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); i++) {
+    ObTableSchema &data_table = tables.at(i);
+    uint64_t data_table_id = data_table.get_table_id();
+    tables_map.insert(std::pair<uint64_t, ObTableSchema *>(data_table_id, &data_table));
+  }
+
   if (OB_FAIL(check_inner_stat())) {
     LOG_WARN("variable is not init", KR(ret));
   } else if (OB_ISNULL(rpc_proxy_)
@@ -23011,6 +23018,186 @@ int ObDDLService::create_tenant_sys_tablets(
       const ObTableSchema &data_table = tables.at(i);
       const uint64_t data_table_id = data_table.get_table_id();
       if (data_table.has_partition()) {
+        table_schemas.reset();
+        if (OB_FAIL(table_schemas.push_back(&data_table))) {
+          LOG_WARN("fail to push back data table ptr", KR(ret), K(data_table_id));
+        } else if (ObSysTableChecker::is_sys_table_has_index(data_table_id)) {
+          if (OB_FAIL(ObSysTableChecker::get_sys_table_index_tids(data_table_id, index_tids))) {
+            LOG_WARN("fail to get sys index tids", KR(ret), K(data_table_id));
+          } else if (i + index_tids.count()  >= tables.count()
+                     || index_tids.count() <= 0) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("sys table's index should be next to its data table",
+                     KR(ret), K(i), "index_cnt",  index_tids.count());
+          } else {
+            for (int64_t j = 0; OB_SUCC(ret) && j < index_tids.count(); j++) {
+              const ObTableSchema &index_schema = tables.at(i + j + 1);
+              const int64_t index_id = index_schema.get_table_id();
+              if (index_id != index_tids.at(j)
+                  || data_table_id != index_schema.get_data_table_id()) {
+                ret = OB_ERR_UNEXPECTED;
+                LOG_WARN("sys index schema order is not match", KR(ret), K(data_table_id), K(j), K(index_schema));
+              } else if (OB_FAIL(table_schemas.push_back(&index_schema))) {
+                LOG_WARN("fail to push back index schema", KR(ret), K(index_id), K(data_table_id));
+              }
+            } // end for
+          }
+        }
+
+        if (OB_SUCC(ret) && is_system_table(data_table_id)) {
+          uint64_t lob_meta_table_id = OB_INVALID_ID;
+          uint64_t lob_piece_table_id = OB_INVALID_ID;
+          if (OB_ALL_CORE_TABLE_TID == data_table_id) {
+            // do nothing
+          } else if (!get_sys_table_lob_aux_table_id(data_table_id, lob_meta_table_id, lob_piece_table_id)) {
+            ret = OB_ENTRY_NOT_EXIST;
+            LOG_WARN("fail to get_sys_table_lob_aux_table_id", KR(ret), K(data_table_id));
+          } else {
+            // int64_t meta_idx = -1;
+            // int64_t piece_idx = -1;
+            // for (int64_t k = i + 1; OB_SUCC(ret) && k < tables.count(); k++) {
+            //   if (tables.at(k).get_table_id() == lob_meta_table_id) {
+            //     meta_idx = k;
+            //   }
+            //   if (tables.at(k).get_table_id() == lob_piece_table_id) {
+            //     piece_idx = k;
+            //   }
+            //   if (meta_idx != -1 && piece_idx != -1) {
+            //     break;
+            //   }
+            // }
+            // if (meta_idx == -1 || piece_idx == -1) {
+            //   ret = OB_ERR_UNEXPECTED;
+            //   LOG_WARN("sys table's lob table not matched", KR(ret), K(meta_idx), K(piece_idx),
+            //            K(lob_piece_table_id), K(lob_meta_table_id), K(data_table_id));
+            // } else {
+            //   if (OB_FAIL(table_schemas.push_back(&tables.at(meta_idx)))) {
+            //     LOG_WARN("fail to push back lob meta aux table ptr", KR(ret), K(meta_idx), K(data_table_id));
+            //   } else if (OB_FAIL(table_schemas.push_back(&tables.at(piece_idx)))) {
+            //     LOG_WARN("fail to push back lob piece aux table ptr", KR(ret), K(piece_idx), K(data_table_id));
+            //   }
+            // }
+            if ((tables_map.count(lob_meta_table_id) == 0) || (tables_map.count(lob_piece_table_id) == 0)) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("sys table's lob table not matched", KR(ret), K(lob_meta_table_id), K(data_table_id));
+            } else {
+              ObTableSchema *meta_table = tables_map.find(lob_meta_table_id)->second;
+              ObTableSchema *piece_table = tables_map.find(lob_piece_table_id)->second;
+              if (OB_FAIL(table_schemas.push_back(meta_table))) {
+                LOG_WARN("fail to push back lob meta aux table ptr", KR(ret), K(data_table_id));
+              } else if (OB_FAIL(table_schemas.push_back(piece_table))) {
+                LOG_WARN("fail to push back lob piece aux table ptr", KR(ret), K(data_table_id));
+              }
+            }
+          }
+        }
+        if (OB_FAIL(ret)) {
+          // failed, bypass
+        } else if (OB_FAIL(new_table_tablet_allocator.prepare(trans, data_table))) {
+          LOG_WARN("fail to prepare ls for index schema tablets");
+        } else if (OB_FAIL(new_table_tablet_allocator.get_ls_id_array(
+                ls_id_array))) {
+          LOG_WARN("fail to get ls id array", KR(ret));
+        } else if (OB_FAIL(table_creator.add_create_tablets_of_tables_arg(
+                table_schemas,
+                ls_id_array))) {
+          LOG_WARN("fail to add create tablets of table", KR(ret), K(data_table), K(table_schemas));
+        }
+      }
+    } // end for
+    LOG_INFO("start table create execute");
+    if (FAILEDx(table_creator.execute())) {
+      LOG_WARN("fail to execute creator", KR(ret), K(tenant_id));
+    } else {
+      ALLOW_NEXT_LOG();
+      LOG_INFO("create tenant sys tables tablet", KR(ret), K(tenant_id));
+    }
+    if (trans.is_started()) {
+      int temp_ret = OB_SUCCESS;
+      bool commit = OB_SUCC(ret);
+      if (OB_SUCCESS != (temp_ret = trans.end(commit))) {
+        ret = (OB_SUCC(ret)) ? temp_ret : ret;
+        LOG_WARN("trans end failed", K(commit), K(temp_ret));
+      }
+    }
+
+    // finishing is always invoked for new table tablet allocator
+    int tmp_ret = OB_SUCCESS;
+    if (OB_SUCCESS != (tmp_ret = new_table_tablet_allocator.finish(OB_SUCCESS == ret))) {
+      LOG_WARN("fail to finish new table tablet allocator", KR(tmp_ret));
+    }
+  }
+  LOG_INFO("[CREATE_TENANT] STEP 2.3. finish create sys table tablets", KR(ret), K(tenant_id),
+           "cost", ObTimeUtility::fast_current_time() - start_time);
+  return ret;
+}
+
+std::unordered_set<uint64_t> has_dep_table_set{
+  OB_ALL_CORE_TABLE_TID,
+  OB_ALL_DDL_OPERATION_TID,
+  OB_ALL_TABLE_TID,
+  OB_ALL_TABLE_HISTORY_TID,
+  OB_ALL_COLUMN_TID,
+  OB_ALL_COLUMN_HISTORY_TID,
+  OB_ALL_AUTO_INCREMENT_TID,
+  OB_ALL_CONSTRAINT_TID,
+  OB_ALL_CONSTRAINT_HISTORY_TID,
+  OB_ALL_TENANT_CONSTRAINT_COLUMN_TID,
+  OB_ALL_TENANT_CONSTRAINT_COLUMN_HISTORY_TID,
+  OB_ALL_PART_INFO_TID,
+  OB_ALL_PART_INFO_HISTORY_TID,
+  OB_ALL_PART_TID,
+  OB_ALL_PART_HISTORY_TID,
+  OB_ALL_SUB_PART_TID,
+  OB_ALL_SUB_PART_HISTORY_TID,
+  OB_ALL_DEF_SUB_PART_TID,
+  OB_ALL_DEF_SUB_PART_HISTORY_TID,
+  OB_ALL_FOREIGN_KEY_TID,
+  OB_ALL_FOREIGN_KEY_HISTORY_TID,
+  OB_ALL_FOREIGN_KEY_COLUMN_TID,
+  OB_ALL_FOREIGN_KEY_COLUMN_HISTORY_TID,
+};
+
+int ObDDLService::create_tenant_tablets_with_dep(
+    const uint64_t tenant_id,
+    common::ObIArray<ObTableSchema> &tables)
+{
+  const int64_t start_time = ObTimeUtility::fast_current_time();
+  LOG_INFO("[CREATE_TENANT] STEP 2.3. start create sys table tablets", K(tenant_id));
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(check_inner_stat())) {
+    LOG_WARN("variable is not init", KR(ret));
+  } else if (OB_ISNULL(rpc_proxy_)
+             || OB_ISNULL(lst_operator_)
+             || OB_ISNULL(sql_proxy_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("ptr is null", KR(ret), KP_(rpc_proxy), KP_(lst_operator));
+  } else {
+    // FIXME: (yanmu.ztl) use actual trans later
+    ObMySQLTransaction trans;
+    share::schema::ObSchemaGetterGuard dummy_guard;
+    SCN frozen_scn = SCN::base_scn();
+    ObTableCreator table_creator(tenant_id,
+                                 frozen_scn,
+                                 trans);
+    ObNewTableTabletAllocator new_table_tablet_allocator(
+                              tenant_id,
+                              dummy_guard,
+                              sql_proxy_);
+    common::ObArray<share::ObLSID> ls_id_array;
+    ObArray<const share::schema::ObTableSchema*> table_schemas;
+    ObArray<uint64_t> index_tids;
+    if (OB_FAIL(trans.start(sql_proxy_, tenant_id))) {
+      LOG_WARN("fail to start trans", KR(ret), K(tenant_id));
+    } else if (OB_FAIL(table_creator.init(false/*need_tablet_cnt_check*/))) {
+      LOG_WARN("fail to init tablet creator", KR(ret), K(tenant_id));
+    } else if (OB_FAIL(new_table_tablet_allocator.init())) {
+      LOG_WARN("fail to init new table tablet allocator", KR(ret));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); i++) {
+      const ObTableSchema &data_table = tables.at(i);
+      const uint64_t data_table_id = data_table.get_table_id();
+      if (data_table.has_partition() && has_dep_table_set.count(data_table_id) > 0) {
         table_schemas.reset();
         if (OB_FAIL(table_schemas.push_back(&data_table))) {
           LOG_WARN("fail to push back data table ptr", KR(ret), K(data_table_id));
@@ -23108,7 +23295,149 @@ int ObDDLService::create_tenant_sys_tablets(
       LOG_WARN("fail to finish new table tablet allocator", KR(tmp_ret));
     }
   }
-  LOG_INFO("[CREATE_TENANT] STEP 2.3. finish create sys table tablets", KR(ret), K(tenant_id),
+  LOG_INFO("[CREATE_TENANT] STEP 2.3. finish create table tablets with dep", KR(ret), K(tenant_id),
+           "cost", ObTimeUtility::fast_current_time() - start_time);
+  return ret;
+}
+
+int ObDDLService::create_tenant_tablets_without_dep(
+    const uint64_t tenant_id,
+    common::ObIArray<ObTableSchema> &tables)
+{
+  const int64_t start_time = ObTimeUtility::fast_current_time();
+  LOG_INFO("[CREATE_TENANT] STEP 2.3. start create sys table tablets", K(tenant_id));
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(check_inner_stat())) {
+    LOG_WARN("variable is not init", KR(ret));
+  } else if (OB_ISNULL(rpc_proxy_)
+             || OB_ISNULL(lst_operator_)
+             || OB_ISNULL(sql_proxy_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("ptr is null", KR(ret), KP_(rpc_proxy), KP_(lst_operator));
+  } else {
+    // FIXME: (yanmu.ztl) use actual trans later
+    ObMySQLTransaction trans;
+    share::schema::ObSchemaGetterGuard dummy_guard;
+    SCN frozen_scn = SCN::base_scn();
+    ObTableCreator table_creator(tenant_id,
+                                 frozen_scn,
+                                 trans);
+    ObNewTableTabletAllocator new_table_tablet_allocator(
+                              tenant_id,
+                              dummy_guard,
+                              sql_proxy_);
+    common::ObArray<share::ObLSID> ls_id_array;
+    ObArray<const share::schema::ObTableSchema*> table_schemas;
+    ObArray<uint64_t> index_tids;
+    if (OB_FAIL(trans.start(sql_proxy_, tenant_id))) {
+      LOG_WARN("fail to start trans", KR(ret), K(tenant_id));
+    } else if (OB_FAIL(table_creator.init(false/*need_tablet_cnt_check*/))) {
+      LOG_WARN("fail to init tablet creator", KR(ret), K(tenant_id));
+    } else if (OB_FAIL(new_table_tablet_allocator.init())) {
+      LOG_WARN("fail to init new table tablet allocator", KR(ret));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); i++) {
+      const ObTableSchema &data_table = tables.at(i);
+      const uint64_t data_table_id = data_table.get_table_id();
+      if (data_table.has_partition() && has_dep_table_set.count(data_table_id) == 0) {
+        table_schemas.reset();
+        if (OB_FAIL(table_schemas.push_back(&data_table))) {
+          LOG_WARN("fail to push back data table ptr", KR(ret), K(data_table_id));
+        } else if (ObSysTableChecker::is_sys_table_has_index(data_table_id)) {
+          if (OB_FAIL(ObSysTableChecker::get_sys_table_index_tids(data_table_id, index_tids))) {
+            LOG_WARN("fail to get sys index tids", KR(ret), K(data_table_id));
+          } else if (i + index_tids.count()  >= tables.count()
+                     || index_tids.count() <= 0) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("sys table's index should be next to its data table",
+                     KR(ret), K(i), "index_cnt",  index_tids.count());
+          } else {
+            for (int64_t j = 0; OB_SUCC(ret) && j < index_tids.count(); j++) {
+              const ObTableSchema &index_schema = tables.at(i + j + 1);
+              const int64_t index_id = index_schema.get_table_id();
+              if (index_id != index_tids.at(j)
+                  || data_table_id != index_schema.get_data_table_id()) {
+                ret = OB_ERR_UNEXPECTED;
+                LOG_WARN("sys index schema order is not match", KR(ret), K(data_table_id), K(j), K(index_schema));
+              } else if (OB_FAIL(table_schemas.push_back(&index_schema))) {
+                LOG_WARN("fail to push back index schema", KR(ret), K(index_id), K(data_table_id));
+              }
+            } // end for
+          }
+        }
+
+        if (OB_SUCC(ret) && is_system_table(data_table_id)) {
+          uint64_t lob_meta_table_id = OB_INVALID_ID;
+          uint64_t lob_piece_table_id = OB_INVALID_ID;
+          if (OB_ALL_CORE_TABLE_TID == data_table_id) {
+            // do nothing
+          } else if (!get_sys_table_lob_aux_table_id(data_table_id, lob_meta_table_id, lob_piece_table_id)) {
+            ret = OB_ENTRY_NOT_EXIST;
+            LOG_WARN("fail to get_sys_table_lob_aux_table_id", KR(ret), K(data_table_id));
+          } else {
+            int64_t meta_idx = -1;
+            int64_t piece_idx = -1;
+            for (int64_t k = i + 1; OB_SUCC(ret) && k < tables.count(); k++) {
+              if (tables.at(k).get_table_id() == lob_meta_table_id) {
+                meta_idx = k;
+              }
+              if (tables.at(k).get_table_id() == lob_piece_table_id) {
+                piece_idx = k;
+              }
+              if (meta_idx != -1 && piece_idx != -1) {
+                break;
+              }
+            }
+            if (meta_idx == -1 || piece_idx == -1) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("sys table's lob table not matched", KR(ret), K(meta_idx), K(piece_idx),
+                       K(lob_piece_table_id), K(lob_meta_table_id), K(data_table_id));
+            } else {
+              if (OB_FAIL(table_schemas.push_back(&tables.at(meta_idx)))) {
+                LOG_WARN("fail to push back lob meta aux table ptr", KR(ret), K(meta_idx), K(data_table_id));
+              } else if (OB_FAIL(table_schemas.push_back(&tables.at(piece_idx)))) {
+                LOG_WARN("fail to push back lob piece aux table ptr", KR(ret), K(piece_idx), K(data_table_id));
+              }
+            }
+          }
+        }
+        if (OB_FAIL(ret)) {
+          // failed, bypass
+        } else if (OB_FAIL(new_table_tablet_allocator.prepare(trans, data_table))) {
+          LOG_WARN("fail to prepare ls for index schema tablets");
+        } else if (OB_FAIL(new_table_tablet_allocator.get_ls_id_array(
+                ls_id_array))) {
+          LOG_WARN("fail to get ls id array", KR(ret));
+        } else if (OB_FAIL(table_creator.add_create_tablets_of_tables_arg(
+                table_schemas,
+                ls_id_array))) {
+          LOG_WARN("fail to add create tablets of table", KR(ret), K(data_table), K(table_schemas));
+        }
+      }
+    } // end for
+    LOG_INFO("start table create execute");
+    if (FAILEDx(table_creator.execute())) {
+      LOG_WARN("fail to execute creator", KR(ret), K(tenant_id));
+    } else {
+      ALLOW_NEXT_LOG();
+      LOG_INFO("create tenant sys tables tablet", KR(ret), K(tenant_id));
+    }
+    if (trans.is_started()) {
+      int temp_ret = OB_SUCCESS;
+      bool commit = OB_SUCC(ret);
+      if (OB_SUCCESS != (temp_ret = trans.end(commit))) {
+        ret = (OB_SUCC(ret)) ? temp_ret : ret;
+        LOG_WARN("trans end failed", K(commit), K(temp_ret));
+      }
+    }
+
+    // finishing is always invoked for new table tablet allocator
+    int tmp_ret = OB_SUCCESS;
+    if (OB_SUCCESS != (tmp_ret = new_table_tablet_allocator.finish(OB_SUCCESS == ret))) {
+      LOG_WARN("fail to finish new table tablet allocator", KR(tmp_ret));
+    }
+  }
+  LOG_INFO("[CREATE_TENANT] STEP 2.3. finish create table tablets without dep", KR(ret), K(tenant_id),
            "cost", ObTimeUtility::fast_current_time() - start_time);
   return ret;
 }
