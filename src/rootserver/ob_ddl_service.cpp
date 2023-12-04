@@ -22706,7 +22706,7 @@ int ObDDLService::create_normal_tenant(
   } else if (OB_FAIL(broadcast_sys_table_schemas(tenant_id, tables))) {
     // 0.2s
     LOG_WARN("fail to broadcast sys table schemas", KR(ret), K(tenant_id));
-  } else if (OB_FAIL(create_tenant_sys_tablets(tenant_id, tables))) {
+  } else if (OB_FAIL(create_tenant_tablets_with_dep(tenant_id, tables))) {
     // 0.5s
     LOG_WARN("fail to create tenant partitions", KR(ret), K(tenant_id));
   } else if (OB_FAIL(init_tenant_schema(tenant_id, tenant_schema,
@@ -23455,6 +23455,20 @@ int ObDDLService::init_tenant_schema(
 {
   const int64_t start_time = ObTimeUtility::fast_current_time();
   LOG_INFO("[CREATE_TENANT] STEP 2.4. start init tenant schemas", K(tenant_id));
+
+  int th_ret;
+  ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
+  std::thread th([&]() {
+    int ret = OB_SUCCESS;
+    set_thread_name("create_tablets");
+    ObCurTraceId::set(*cur_trace_id);
+    if (OB_FAIL(create_tenant_tablets_without_dep(tenant_id, tables))) {
+      LOG_WARN("fail to create tenant partitions", KR(ret), K(tenant_id));
+    }
+
+    ATOMIC_SET(&th_ret, ret);
+  });
+
   int ret = OB_SUCCESS;
   if (OB_FAIL(check_inner_stat())) {
     LOG_WARN("variable is not init", KR(ret));
@@ -23554,6 +23568,12 @@ int ObDDLService::init_tenant_schema(
       if (OB_FAIL(parallel_create_schemas_check_correlartion(tenant_id, tables))) {
         LOG_WARN("fail to create sys tables", KR(ret), K(tenant_id));
       }
+
+      th.join();
+      if (OB_SUCC(ret)) {
+        ret = th_ret;
+      }
+
       ObDDLOperator ddl_operator(*schema_service_, *sql_proxy_);
       ObDDLSQLTransaction trans(schema_service_, true, true, false, false);
       const int64_t init_schema_version = tenant_schema.get_schema_version();

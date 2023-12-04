@@ -68,6 +68,7 @@ int retry_release_lock_with_op_until_timeout(const MdsLock &lock,
                                              OP &&op) {
   int ret = OB_SUCCESS;
   MDS_TG(10_ms);
+  unsigned int sleep_um = 1000 + (rand()*1000/RAND_MAX);
   do {
     int64_t current_ts = ObClockGenerator::getClock();;
     typename LockModeGuard<MODE>::type lg(lock);
@@ -78,7 +79,7 @@ int retry_release_lock_with_op_until_timeout(const MdsLock &lock,
         }
       }
     }
-  } while (OB_EAGAIN == ret && ({ ob_usleep(10_ms); ++retry_param; true; }));
+  } while (OB_EAGAIN == ret && ({ ob_usleep(sleep_um); ++retry_param; true; }));
   return ret;
   #undef PRINT_WRAPPER
 };

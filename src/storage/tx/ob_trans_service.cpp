@@ -743,7 +743,7 @@ int ObTransService::register_mds_into_tx(ObTxDesc &tx_desc,
                                          const ObRegisterMdsFlag &register_flag)
 {
   const int64_t MAX_RETRY_CNT = 5;
-  const int64_t RETRY_INTERVAL = 10 * 1000;
+  const int64_t RETRY_INTERVAL = 5 * 1000;
 
   ObTimeGuard time_guard("register mds", 1 * 1000 * 1000);
 
