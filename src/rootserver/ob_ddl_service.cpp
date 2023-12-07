@@ -24567,6 +24567,8 @@ private:
   ObLoadDatumRowCompare compare_;
   common::ObVector<const ObLoadDatumRow *> item_list_;
   ObLoadSSTableWriter sstable_writer_;
+
+  ObSpinLock lock_;
 };
 
 int ObLoadDirectAddColumns::init(const ObTableSchema *schema)
@@ -24595,6 +24597,7 @@ int ObLoadDirectAddColumns::init(const ObTableSchema *schema)
 
 int ObLoadDirectAddColumns::add_item(const ObLoadDatumRow &row)
 {
+  common::ObSpinLockGuard guard(lock_);
   int ret = common::OB_SUCCESS;
   const int64_t item_size = sizeof(ObLoadDatumRow) + row.get_deep_copy_size();
   char *buf = NULL;
@@ -24640,45 +24643,111 @@ int ObDDLService::create_schemas_add_columns_direct_load(uint64_t tenant_id, ObI
   int ret = OB_SUCCESS;
   ObLoadDirectAddColumns load;
   ObLoadDirectAddColumns history_load;
-  ObLoadDatumRow row;
-  ObLoadDatumRow history_row;
-  const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
+
   if (OB_FAIL(load.init(schema))) {
     LOG_WARN("fail to init load unit", KR(ret));
-  } else if (OB_FAIL(row.init(schema->get_column_count()))) {
-    LOG_WARN("fail to init datum row", KR(ret));
   } else if (OB_FAIL(history_load.init(history_schema))) {
     LOG_WARN("fail to init load unit", KR(ret));
-  } else if (OB_FAIL(history_row.init(history_schema->get_column_count()))) {
-    LOG_WARN("fail to init datum row", KR(ret));
-  } else {
-    for (int i = 0; i < table_schemas.count(); i++) {
-      ObTableSchema &table = *table_schemas.at(i);
-      if (table.is_view_table() && !table.view_column_filled()) {
-        continue;
-      }
-      for (ObTableSchema::const_column_iterator iter = table.column_begin();
-        OB_SUCCESS == ret && iter != table.column_end(); ++iter) {
-        if (OB_ISNULL(*iter)) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("iter is NULL", K(ret));
-        } else {
-          ObColumnSchemaV2 column = (**iter);
-          column.set_schema_version(table.get_schema_version());
-          column.set_tenant_id(table.get_tenant_id());
-          column.set_table_id(table.get_table_id());
-          gen_column_dml_for_load_data_datum(exec_tenant_id, column, schema, row, history_schema, history_row);
-          load.add_item(row);
-          history_load.add_item(history_row);
+  }
+
+  int THREAD_NUM = 4;
+  if (is_sys_tenant(tenant_id)) {
+    THREAD_NUM = 8;
+  }
+  int64_t begin = 0;
+  int64_t batch_count = table_schemas.count() / THREAD_NUM;
+
+  std::vector<std::thread> ths;
+  ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_schemas.count(); ++i) {
+    if (table_schemas.count() == (i + 1) || (i + 1 - begin) >= batch_count) {
+      std::thread th([&, begin, i, cur_trace_id] () {
+        set_thread_name("create column list");
+        int ret = OB_SUCCESS;
+        ObCurTraceId::set(*cur_trace_id);
+        ObLoadDatumRow row;
+        ObLoadDatumRow history_row;
+        const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
+        if (OB_FAIL(row.init(schema->get_column_count()))) {
+          LOG_WARN("fail to init datum row", KR(ret));
+        } else if (OB_FAIL(history_row.init(history_schema->get_column_count()))) {
+          LOG_WARN("fail to init datum row", KR(ret));
         }
+
+        for (int k = begin; k < i + 1; k++) {
+          ObTableSchema &table = *table_schemas.at(k);
+          if (table.is_view_table() && !table.view_column_filled()) {
+            continue;
+          }
+          for (ObTableSchema::const_column_iterator iter = table.column_begin();
+              OB_SUCCESS == ret && iter != table.column_end(); ++iter) {
+            if (OB_ISNULL(*iter)) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("iter is NULL", K(ret));
+            } else {
+              ObColumnSchemaV2 column = (**iter);
+              column.set_schema_version(table.get_schema_version());
+              column.set_tenant_id(table.get_tenant_id());
+              column.set_table_id(table.get_table_id());
+              gen_column_dml_for_load_data_datum(exec_tenant_id, column, schema, row, history_schema, history_row);
+              load.add_item(row);
+              history_load.add_item(history_row);
+            }
+          }
+        }
+        
+      });
+      ths.push_back(std::move(th));
+      if (OB_SUCC(ret)) {
+        begin = i + 1;
       }
     }
-    if (OB_FAIL(ret)) {
-    } else if (OB_FAIL(load.do_load())) {
-      LOG_WARN("failed to do load", KR(ret));
-    } else if (OB_FAIL(history_load.do_load())) {
-      LOG_WARN("failed to do load for history", KR(ret));
-    }
+  }
+
+  for (auto &th : ths) {
+    th.join();
+  }
+
+
+  // ObLoadDatumRow row;
+  // ObLoadDatumRow history_row;
+  // const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
+  // if (OB_FAIL(load.init(schema))) {
+  //   LOG_WARN("fail to init load unit", KR(ret));
+  // } else if (OB_FAIL(row.init(schema->get_column_count()))) {
+  //   LOG_WARN("fail to init datum row", KR(ret));
+  // } else if (OB_FAIL(history_load.init(history_schema))) {
+  //   LOG_WARN("fail to init load unit", KR(ret));
+  // } else if (OB_FAIL(history_row.init(history_schema->get_column_count()))) {
+  //   LOG_WARN("fail to init datum row", KR(ret));
+  // } else {
+  //   for (int i = 0; i < table_schemas.count(); i++) {
+  //     ObTableSchema &table = *table_schemas.at(i);
+  //     if (table.is_view_table() && !table.view_column_filled()) {
+  //       continue;
+  //     }
+  //     for (ObTableSchema::const_column_iterator iter = table.column_begin();
+  //       OB_SUCCESS == ret && iter != table.column_end(); ++iter) {
+  //       if (OB_ISNULL(*iter)) {
+  //         ret = OB_ERR_UNEXPECTED;
+  //         LOG_WARN("iter is NULL", K(ret));
+  //       } else {
+  //         ObColumnSchemaV2 column = (**iter);
+  //         column.set_schema_version(table.get_schema_version());
+  //         column.set_tenant_id(table.get_tenant_id());
+  //         column.set_table_id(table.get_table_id());
+  //         gen_column_dml_for_load_data_datum(exec_tenant_id, column, schema, row, history_schema, history_row);
+  //         load.add_item(row);
+  //         history_load.add_item(history_row);
+  //       }
+  //     }
+  //   }
+  // }
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(load.do_load())) {
+    LOG_WARN("failed to do load", KR(ret));
+  } else if (OB_FAIL(history_load.do_load())) {
+    LOG_WARN("failed to do load for history", KR(ret));
   }
 
   return ret;
