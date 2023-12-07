@@ -349,7 +349,7 @@ void ObAsyncSqlWorker::run1()
       LOG_ERROR("query_write", K(ret), K(affected_rows), "row_cnt", desc->get_row_cnt(), "query", desc->get_stash_query());
     } else {
       const uint64_t end_time = ObTimeUtility::current_time();
-      LOG_INFO("query_write_async succ", "rows", affected_rows, "cost", end_time - start_time);
+      LOG_INFO("query_write_async succ", "rows", affected_rows, "sql_len", desc->get_stash_query().length(), "cost", end_time - start_time);
     }
 
     cond_.lock();

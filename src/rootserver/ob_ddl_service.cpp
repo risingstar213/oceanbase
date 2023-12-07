@@ -117,6 +117,9 @@
 #include "storage/tx_storage/ob_ls_service.h"
 #include "storage/tablelock/ob_lock_inner_connection_util.h"
 
+#include "share/tablet/ob_tablet_to_ls_operator.h"
+#include "storage/tablet/ob_tablet_create_delete_helper.h"
+
 #include <vector>
 #include <thread>
 #include <unordered_set>
@@ -23736,6 +23739,952 @@ int ObDDLService::create_sys_table_schemas(
   return ret;
 }
 
+/**
+ * ObLoadDatumRow
+ */
+
+class ObLoadDatumRow
+{
+  OB_UNIS_VERSION(1);
+public:
+  ObLoadDatumRow();
+  ~ObLoadDatumRow();
+  void reset();
+  int init(int64_t capacity);
+  int64_t get_deep_copy_size() const;
+  int deep_copy(const ObLoadDatumRow &src, char *buf, int64_t len, int64_t &pos);
+  OB_INLINE bool is_valid() const { return count_ > 0 && nullptr != datums_; }
+  DECLARE_TO_STRING;
+public:
+  common::ObArenaAllocator allocator_;
+  int64_t capacity_;
+  int64_t count_;
+  blocksstable::ObStorageDatum *datums_;
+};
+
+ObLoadDatumRow::ObLoadDatumRow()
+  : allocator_(ObModIds::OB_SQL_LOAD_DATA), capacity_(0), count_(0), datums_(nullptr)
+{
+}
+
+ObLoadDatumRow::~ObLoadDatumRow()
+{
+}
+
+void ObLoadDatumRow::reset()
+{
+  allocator_.reset();
+  capacity_ = 0;
+  count_ = 0;
+  datums_ = nullptr;
+}
+
+int ObLoadDatumRow::init(int64_t capacity)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(capacity <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid args", KR(ret), K(capacity));
+  } else {
+    reset();
+    allocator_.set_tenant_id(MTL_ID());
+    if (OB_ISNULL(datums_ = static_cast<ObStorageDatum *>(
+                    allocator_.alloc(sizeof(ObStorageDatum) * capacity)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("fail to alloc memory", KR(ret));
+    } else {
+      new (datums_) ObStorageDatum[capacity];
+      capacity_ = capacity;
+      count_ = capacity;
+    }
+  }
+  return ret;
+}
+
+int64_t ObLoadDatumRow::get_deep_copy_size() const
+{
+  int64_t size = 0;
+  size += sizeof(ObStorageDatum) * count_;
+  for (int64_t i = 0; i < count_; ++i) {
+    size += datums_[i].get_deep_copy_size();
+  }
+  return size;
+}
+
+int ObLoadDatumRow::deep_copy(const ObLoadDatumRow &src, char *buf, int64_t len, int64_t &pos)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!src.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid args", KR(ret), K(src));
+  } else {
+    reset();
+    ObStorageDatum *datums = nullptr;
+    const int64_t datum_cnt = src.count_;
+    datums = new (buf + pos) ObStorageDatum[datum_cnt];
+    pos += sizeof(ObStorageDatum) * datum_cnt;
+    for (int64_t i = 0; OB_SUCC(ret) && i < datum_cnt; ++i) {
+      if (OB_FAIL(datums[i].deep_copy(src.datums_[i], buf, len, pos))) {
+        LOG_WARN("fail to deep copy storage datum", KR(ret), K(src.datums_[i]));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      capacity_ = datum_cnt;
+      count_ = datum_cnt;
+      datums_ = datums;
+    }
+  }
+  return ret;
+}
+
+DEF_TO_STRING(ObLoadDatumRow)
+{
+  int64_t pos = 0;
+  J_OBJ_START();
+  J_KV(K_(capacity), K_(count));
+  if (nullptr != datums_) {
+    J_ARRAY_START();
+    for (int64_t i = 0; i < count_; ++i) {
+      databuff_printf(buf, buf_len, pos, "col_id=%ld:", i);
+      pos += datums_[i].storage_to_string(buf + pos, buf_len - pos);
+      databuff_printf(buf, buf_len, pos, ",");
+    }
+    J_ARRAY_END();
+  }
+  J_OBJ_END();
+  return pos;
+}
+
+OB_DEF_SERIALIZE(ObLoadDatumRow)
+{
+  int ret = OB_SUCCESS;
+  OB_UNIS_ENCODE_ARRAY(datums_, count_);
+  return ret;
+}
+
+OB_DEF_DESERIALIZE(ObLoadDatumRow)
+{
+  int ret = OB_SUCCESS;
+  int64_t count = 0;
+  OB_UNIS_DECODE(count);
+  if (OB_SUCC(ret)) {
+    if (OB_UNLIKELY(count <= 0)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected count", K(count));
+    } else if (count > capacity_ && OB_FAIL(init(count))) {
+      LOG_WARN("fail to init", KR(ret));
+    } else {
+      OB_UNIS_DECODE_ARRAY(datums_, count);
+      count_ = count;
+    }
+  }
+  return ret;
+}
+
+OB_DEF_SERIALIZE_SIZE(ObLoadDatumRow)
+{
+  int64_t len = 0;
+  OB_UNIS_ADD_LEN_ARRAY(datums_, count_);
+  return len;
+}
+
+// Caster
+int cast_obj_to_datum(const ObColumnSchemaV2 *column_schema, const ObObj &obj,
+                                       ObStorageDatum &datum)
+{
+  int ret = OB_SUCCESS;
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(datum.from_obj_enhance(obj))) {
+      LOG_WARN("fail to from obj enhance", KR(ret), K(obj));
+    }
+  }
+  return ret;
+}
+int gen_column_dml_for_load_data_datum(
+  const uint64_t exec_tenant_id, 
+  const ObColumnSchemaV2 &column,
+  ObTableSchema *schema,
+  ObLoadDatumRow &row,
+  ObTableSchema *history_schema,
+  ObLoadDatumRow &history_row)
+{
+  int ret = OB_SUCCESS;
+  ObString orig_default_value;
+  ObString cur_default_value;
+  ObArenaAllocator allocator(ObModIds::OB_SCHEMA_OB_SCHEMA_ARENA);
+  char *extended_type_info_buf = NULL;
+  uint64_t tenant_data_version = 0;
+  ObObj cells[33];
+  int64_t hist_idx_in_cells[33];
+  if (OB_FAIL(GET_MIN_DATA_VERSION(exec_tenant_id, tenant_data_version))) {
+    LOG_WARN("get tenant data version failed", K(ret));
+  } else if (tenant_data_version < DATA_VERSION_4_2_0_0 &&
+             (column.is_xmltype() || column.get_udt_set_id() != 0 || column.get_sub_data_type() != 0)) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("tenant data version is less than 4.2, xmltype type is not supported", K(ret), K(tenant_data_version), K(column));
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "tenant data version is less than 4.2, xmltype");
+  } else if (tenant_data_version < DATA_VERSION_4_1_0_0 && ob_is_json(column.get_data_type())) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("tenant data version is less than 4.1, json type is not supported", K(ret), K(tenant_data_version), K(column));
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "tenant data version is less than 4.1, json type");
+  } else if (tenant_data_version < DATA_VERSION_4_1_0_0 &&
+             (ob_is_geometry(column.get_data_type()) ||
+             column.get_srs_id() != OB_DEFAULT_COLUMN_SRS_ID ||
+             column.is_spatial_generated_column())) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("tenant data version is less than 4.1, geometry type is not supported", K(ret), K(tenant_data_version), K(column));
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "tenant data version is less than 4.1, geometry type");
+  } else if (OB_FAIL(sql::ObSQLUtils::is_charset_data_version_valid(column.get_charset_type(),
+                                                                    exec_tenant_id))) {
+    LOG_WARN("failed to check charset data version valid", K(ret));
+  } else if (column.is_generated_column() ||
+      column.is_identity_column() ||
+      ob_is_string_type(column.get_data_type()) ||
+      ob_is_json(column.get_data_type()) ||
+      ob_is_geometry(column.get_data_type())) {
+    //The default value of the generated column is the expression definition of the generated column
+    ObString orig_default_value_str = column.get_orig_default_value().get_string();
+    ObString cur_default_value_str = column.get_cur_default_value().get_string();
+    orig_default_value.assign_ptr(orig_default_value_str.ptr(), orig_default_value_str.length());
+    cur_default_value.assign_ptr(cur_default_value_str.ptr(), cur_default_value_str.length());
+    if (!column.get_orig_default_value().is_null() && OB_ISNULL(orig_default_value.ptr())) {
+      orig_default_value.assign_ptr("", 0);
+    }
+    if (!column.get_cur_default_value().is_null() && OB_ISNULL(cur_default_value.ptr())) {
+      cur_default_value.assign_ptr("", 0);
+    }
+  } else {
+    const int64_t value_buf_len = 2 * OB_MAX_DEFAULT_VALUE_LENGTH + 3;
+    char *orig_default_value_buf = NULL;
+    char *cur_default_value_buf = NULL;
+    orig_default_value_buf = static_cast<char *>(allocator.alloc(value_buf_len));
+    cur_default_value_buf = static_cast<char *>(allocator.alloc(value_buf_len));
+    extended_type_info_buf = static_cast<char *>(allocator.alloc(OB_MAX_VARBINARY_LENGTH));
+    lib::Worker::CompatMode compat_mode = lib::Worker::CompatMode::INVALID;
+    if (OB_ISNULL(orig_default_value_buf)
+        || OB_ISNULL(cur_default_value_buf)
+        || OB_ISNULL(extended_type_info_buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("allocate memory for default value buffer failed");
+    } else if (OB_FAIL(ObCompatModeGetter::get_table_compat_mode(
+               column.get_tenant_id(), column.get_table_id(), compat_mode))) {
+      LOG_WARN("fail to get tenant mode", K(ret), K(column));
+    } else {
+      MEMSET(orig_default_value_buf, 0, value_buf_len);
+      MEMSET(cur_default_value_buf, 0, value_buf_len);
+      MEMSET(extended_type_info_buf, 0, OB_MAX_VARBINARY_LENGTH);
+
+      int64_t orig_default_value_len = 0;
+      int64_t cur_default_value_len = 0;
+      lib::CompatModeGuard compat_mode_guard(compat_mode);
+      ObTimeZoneInfo tz_info;
+      if (OB_FAIL(OTTZ_MGR.get_tenant_tz(exec_tenant_id, tz_info.get_tz_map_wrap()))) {
+        LOG_WARN("get tenant timezone failed", K(ret));
+      } else if (OB_FAIL(column.get_orig_default_value().print_plain_str_literal(
+                      orig_default_value_buf, value_buf_len, orig_default_value_len, &tz_info))) {
+        LOG_WARN("failed to print orig default value", K(ret),
+                 K(value_buf_len), K(orig_default_value_len));
+      } else if (OB_FAIL(column.get_cur_default_value().print_plain_str_literal(
+                             cur_default_value_buf, value_buf_len, cur_default_value_len, &tz_info))) {
+        LOG_WARN("failed to print cur default value",
+                 K(ret), K(value_buf_len), K(cur_default_value_len));
+      } else {
+        orig_default_value.assign_ptr(orig_default_value_buf, static_cast<int32_t>(orig_default_value_len));
+        cur_default_value.assign_ptr(cur_default_value_buf, static_cast<int32_t>(cur_default_value_len));
+      }
+      LOG_TRACE("begin gen_column_dml", K(ret), K(compat_mode), K(orig_default_value), K(cur_default_value),  K(orig_default_value_len), K(cur_default_value_len));
+    }
+  }
+  LOG_TRACE("begin gen_column_dml", K(ret), K(orig_default_value), K(cur_default_value), K(column));
+  if (OB_SUCC(ret)) {
+    ObString cur_default_value_v1;
+    if (column.get_orig_default_value().is_null()) {
+      orig_default_value.reset();
+    }
+    if (column.get_cur_default_value().is_null()) {
+      cur_default_value.reset();
+    }
+    ObString bin_extended_type_info;
+    if (OB_SUCC(ret) && column.is_enum_or_set()) {
+      int64_t pos = 0;
+      extended_type_info_buf = static_cast<char *>(allocator.alloc(OB_MAX_VARBINARY_LENGTH));
+      if (OB_ISNULL(extended_type_info_buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("allocate memory for default value buffer failed");
+      } else if (OB_FAIL(column.serialize_extended_type_info(extended_type_info_buf, OB_MAX_VARBINARY_LENGTH, pos))) {
+        LOG_WARN("fail to serialize_extended_type_info", K(ret));
+      } else {
+        bin_extended_type_info.assign_ptr(extended_type_info_buf, static_cast<int32_t>(pos));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      cells[0].set_timestamp(ObTimeUtility::current_time());
+      cells[1].set_timestamp(ObTimeUtility::current_time());
+      cells[2].set_int(ObIntType, ObSchemaUtils::get_extract_tenant_id(exec_tenant_id, column.get_tenant_id()));
+      cells[3].set_int(ObIntType, ObSchemaUtils::get_extract_schema_id(exec_tenant_id, column.get_table_id()));
+      cells[4].set_int(ObIntType, column.get_column_id());
+      cells[5].set_varchar(column.get_column_name());
+      cells[6].set_int(ObIntType, column.get_rowkey_position());
+      cells[7].set_int(ObIntType, column.get_index_position());
+      cells[8].set_int(ObIntType, column.get_order_in_rowkey());
+      cells[9].set_int(ObIntType, column.get_part_key_pos());
+      cells[10].set_int(ObIntType, column.get_data_type());
+      cells[11].set_int(ObIntType, column.get_data_length());
+      cells[12].set_int(ObIntType, column.get_data_precision());
+      cells[13].set_int(ObIntType, column.get_data_scale());
+      cells[14].set_int(ObIntType, column.is_zero_fill());
+      cells[15].set_int(ObIntType, column.is_nullable());
+      cells[16].set_int(ObIntType, column.is_on_update_current_timestamp());
+      cells[17].set_int(ObIntType, column.is_autoincrement());
+      cells[18].set_int(ObIntType, column.is_hidden());
+      cells[19].set_int(ObIntType, column.get_collation_type());
+      cells[20].set_null(); // orig default value
+      if (cur_default_value_v1.ptr() == NULL) {
+        cells[21].set_null(); // cur default value
+      } else {
+        cells[21].set_varchar(cur_default_value_v1);
+      }
+      if (column.get_comment() == NULL) {
+        cells[22].set_null();
+      } else {
+        cells[22].set_lob_value(ObLongTextType, column.get_comment(), strlen(column.get_comment()));
+      }
+      cells[23].set_int(ObIntType, column.get_schema_version());
+      cells[24].set_int(ObIntType, column.get_column_flags());
+      cells[25].set_int(ObIntType, column.get_prev_column_id());
+      if (bin_extended_type_info.ptr() == NULL) {
+        cells[26].set_null();
+      } else {
+        cells[26].set_varchar(bin_extended_type_info);
+      }
+      if (orig_default_value.ptr() == NULL) {
+        cells[27].set_null(); // orig default value v2
+      } else {
+        cells[27].set_varchar(orig_default_value);
+      }
+      if (cur_default_value.ptr() == NULL) {
+        cells[28].set_null(); // cur default value v2
+      } else {
+        cells[28].set_varchar(cur_default_value);
+      }
+      cells[29].set_int(ObIntType, column.get_srs_id());
+      cells[30].set_int(ObIntType, column.get_udt_set_id());
+      cells[31].set_int(ObIntType, column.get_sub_data_type());
+      cells[32].set_int(ObIntType, false); // is deleted
+
+      hist_idx_in_cells[0] = 0; // gmt create
+      hist_idx_in_cells[1] = 1; // gmt modified
+      hist_idx_in_cells[2] = 2; // tenant id
+      hist_idx_in_cells[3] = 3; // table id
+      hist_idx_in_cells[4] = 4; // column id
+      hist_idx_in_cells[5] = 23; // schema version
+      hist_idx_in_cells[6] = 32; // is deleted
+      hist_idx_in_cells[7] = 5; // column name
+      hist_idx_in_cells[8] = 6; // rowkey pos
+      hist_idx_in_cells[9] = 7; // index pos
+      hist_idx_in_cells[10] = 8; // order in rowkey
+      hist_idx_in_cells[11] = 9; // part key pos
+      hist_idx_in_cells[12] = 10; // data type
+      hist_idx_in_cells[13] = 11; // data length
+      hist_idx_in_cells[14] = 12; // data precision
+      hist_idx_in_cells[15] = 13; // data scale
+      hist_idx_in_cells[16] = 14; // zero fill
+      hist_idx_in_cells[17] = 15; // nullable
+      hist_idx_in_cells[18] = 16; // on update timestamp
+      hist_idx_in_cells[19] = 17; // autoincrement
+      hist_idx_in_cells[20] = 18; // is hidden
+      hist_idx_in_cells[21] = 19; // collation type
+      hist_idx_in_cells[22] = 20; // orig default value
+      hist_idx_in_cells[23] = 21; // cur default value
+      hist_idx_in_cells[24] = 22; // comment
+      hist_idx_in_cells[25] = 24; // column flags
+      hist_idx_in_cells[26] = 25; // prev column id
+      hist_idx_in_cells[27] = 26; // extend type info
+      hist_idx_in_cells[28] = 27; // orig default value v2
+      hist_idx_in_cells[29] = 28; // cur default value v2
+      hist_idx_in_cells[30] = 29; // srs id
+      hist_idx_in_cells[31] = 30; // udt id
+      hist_idx_in_cells[32] = 31; // sub data type
+    }
+
+    for (int i = 0; i < 3; i++) {
+      const ObColumnSchemaV2 *column_schema = schema->get_column_schema_by_idx(i+2);
+      const ObObj &src_obj = cells[i+2];
+      ObStorageDatum &dest_datum = row.datums_[i];
+      if (OB_FAIL(cast_obj_to_datum(column_schema, src_obj, dest_datum))) {
+        LOG_WARN("fail to cast obj to datum", KR(ret), K(src_obj));
+      }
+    }
+
+    for (int i = 3; i < 5; i++) {
+      const ObColumnSchemaV2 *column_schema = schema->get_column_schema_by_idx(i-3);
+      const ObObj &src_obj = cells[i-3];
+      ObStorageDatum &dest_datum = row.datums_[i];
+      if (OB_FAIL(cast_obj_to_datum(column_schema, src_obj, dest_datum))) {
+        LOG_WARN("fail to cast obj to datum", KR(ret), K(src_obj));
+      }
+    }
+    
+    for (int i = 5; i < 32; i++) {
+      const ObColumnSchemaV2 *column_schema = schema->get_column_schema_by_idx(i);
+      const ObObj &src_obj = cells[i];
+      ObStorageDatum &dest_datum = row.datums_[i];
+      if (OB_FAIL(cast_obj_to_datum(column_schema, src_obj, dest_datum))) {
+        LOG_WARN("fail to cast obj to datum", KR(ret), K(src_obj));
+      }
+    }
+
+    for (int i = 0; i < 3; i++) {
+      const ObColumnSchemaV2 *column_schema = history_schema->get_column_schema_by_idx(i+2);
+      const ObObj &src_obj = cells[i+2];
+      ObStorageDatum &dest_datum = history_row.datums_[i];
+      if (OB_FAIL(cast_obj_to_datum(column_schema, src_obj, dest_datum))) {
+        LOG_WARN("fail to cast obj to datum", KR(ret), K(src_obj));
+      }
+    }
+    if (true) {
+      const ObColumnSchemaV2 *column_schema = history_schema->get_column_schema_by_idx(3);
+      const ObObj &src_obj = cells[23];
+      ObStorageDatum &dest_datum = history_row.datums_[3];
+      if (OB_FAIL(cast_obj_to_datum(column_schema, src_obj, dest_datum))) {
+        LOG_WARN("fail to cast obj to datum", KR(ret), K(src_obj));
+      }
+    }
+
+    for (int i = 4; i < 6; i++) {
+      const ObColumnSchemaV2 *column_schema = history_schema->get_column_schema_by_idx(i-4);
+      const ObObj &src_obj = cells[i-4];
+      ObStorageDatum &dest_datum = history_row.datums_[i];
+      if (OB_FAIL(cast_obj_to_datum(column_schema, src_obj, dest_datum))) {
+        LOG_WARN("fail to cast obj to datum", KR(ret), K(src_obj));
+      }
+    }
+
+    for (int i = 6; i < 33; i++) {
+      const ObColumnSchemaV2 *column_schema = history_schema->get_column_schema_by_idx(i);
+      const ObObj &src_obj = cells[hist_idx_in_cells[i]];
+      ObStorageDatum &dest_datum = history_row.datums_[i];
+      if (OB_FAIL(cast_obj_to_datum(column_schema, src_obj, dest_datum))) {
+        LOG_WARN("fail to cast obj to datum", KR(ret), K(src_obj));
+      }
+    }
+  }
+
+  return ret;
+}
+/**
+ * ObLoadDatumRowCompare
+ */
+
+class ObLoadDatumRowCompare
+{
+public:
+  ObLoadDatumRowCompare();
+  ~ObLoadDatumRowCompare();
+  int init(int64_t rowkey_column_num, const blocksstable::ObStorageDatumUtils *datum_utils);
+  bool operator()(const ObLoadDatumRow *lhs, const ObLoadDatumRow *rhs);
+  int get_error_code() const { return result_code_; }
+public:
+  int result_code_;
+private:
+  int64_t rowkey_column_num_;
+  const blocksstable::ObStorageDatumUtils *datum_utils_;
+  blocksstable::ObDatumRowkey lhs_rowkey_;
+  blocksstable::ObDatumRowkey rhs_rowkey_;
+  bool is_inited_;
+};
+
+ObLoadDatumRowCompare::ObLoadDatumRowCompare()
+  : result_code_(OB_SUCCESS), rowkey_column_num_(0), datum_utils_(nullptr), is_inited_(false)
+{
+}
+
+ObLoadDatumRowCompare::~ObLoadDatumRowCompare()
+{
+}
+
+int ObLoadDatumRowCompare::init(int64_t rowkey_column_num, const ObStorageDatumUtils *datum_utils)
+{
+  int ret = OB_SUCCESS;
+  if (IS_INIT) {
+    ret = OB_INIT_TWICE;
+    LOG_WARN("ObLoadDatumRowCompare init twice", KR(ret), KP(this));
+  } else if (OB_UNLIKELY(rowkey_column_num <= 0 || nullptr == datum_utils)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid args", KR(ret), K(rowkey_column_num), KP(datum_utils));
+  } else {
+    rowkey_column_num_ = rowkey_column_num;
+    datum_utils_ = datum_utils;
+    is_inited_ = true;
+  }
+  return ret;
+}
+
+bool ObLoadDatumRowCompare::operator()(const ObLoadDatumRow *lhs, const ObLoadDatumRow *rhs)
+{
+  int ret = OB_SUCCESS;
+  int cmp_ret = 0;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ObDirectLoadDatumRowCompare not init", KR(ret), KP(this));
+  } else if (OB_ISNULL(lhs) || OB_ISNULL(rhs) ||
+             OB_UNLIKELY(!lhs->is_valid() || !rhs->is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid args", KR(ret), KPC(lhs), KPC(rhs));
+  } else if (OB_UNLIKELY(lhs->count_ < rowkey_column_num_ || rhs->count_ < rowkey_column_num_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected column count", KR(ret), KPC(lhs), KPC(rhs), K_(rowkey_column_num));
+  } else {
+    if (OB_FAIL(lhs_rowkey_.assign(lhs->datums_, int(rowkey_column_num_)))) {
+      LOG_WARN("fail to assign datum rowkey", KR(ret), K(lhs), K_(rowkey_column_num));
+    } else if (OB_FAIL(rhs_rowkey_.assign(rhs->datums_, int(rowkey_column_num_)))) {
+      LOG_WARN("fail to assign datum rowkey", KR(ret), K(rhs), K_(rowkey_column_num));
+    } else if (OB_FAIL(lhs_rowkey_.compare(rhs_rowkey_, *datum_utils_, cmp_ret))) {
+      LOG_WARN("fail to compare rowkey", KR(ret), K(rhs_rowkey_), K(rhs_rowkey_), KP(datum_utils_));
+    }
+  }
+  if (OB_FAIL(ret)) {
+    result_code_ = ret;
+  }
+  return cmp_ret < 0;
+}
+
+// internel 
+class ObLoadSSTableWriter
+{
+public:
+  ObLoadSSTableWriter();
+  ~ObLoadSSTableWriter();
+  int init(const share::schema::ObTableSchema *table_schema);
+  int append_row(const ObLoadDatumRow &datum_row);
+  int close();
+private:
+  int init_sstable_index_builder(const share::schema::ObTableSchema *table_schema);
+  int init_macro_block_writer(const share::schema::ObTableSchema *table_schema);
+  int create_sstable();
+private:
+  common::ObTabletID tablet_id_;
+  storage::ObTabletHandle tablet_handle_;
+  share::ObLSID ls_id_;
+  storage::ObLSHandle ls_handle_;
+  int64_t rowkey_column_num_;
+  int64_t extra_rowkey_column_num_;
+  int64_t column_count_;
+  storage::ObITable::TableKey table_key_;
+  SCN snapshot_version_;
+  blocksstable::ObSSTableIndexBuilder sstable_index_builder_;
+  blocksstable::ObDataStoreDesc data_store_desc_;
+  blocksstable::ObMacroBlockWriter macro_block_writer_;
+  blocksstable::ObDatumRow datum_row_;
+
+  common::ObArenaAllocator lob_allocator_;
+  bool is_closed_;
+  bool is_inited_;
+};
+
+ObLoadSSTableWriter::ObLoadSSTableWriter()
+  : rowkey_column_num_(0),
+    extra_rowkey_column_num_(0),
+    column_count_(0),
+    is_closed_(false),
+    is_inited_(false)
+{
+}
+
+ObLoadSSTableWriter::~ObLoadSSTableWriter()
+{
+}
+
+int ObLoadSSTableWriter::init(const ObTableSchema *table_schema)
+{
+  int ret = OB_SUCCESS;
+  if (IS_INIT) {
+    ret = OB_INIT_TWICE;
+    LOG_WARN("ObLoadSSTableWriter init twice", KR(ret), KP(this));
+  } else if (OB_UNLIKELY(nullptr == table_schema)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid args", KR(ret), KP(table_schema));
+  } else {
+    ls_id_ = 1;
+    tablet_id_ = table_schema->get_tablet_id();
+    rowkey_column_num_ = table_schema->get_rowkey_column_num();
+    extra_rowkey_column_num_ = ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt();
+    column_count_ = table_schema->get_column_count();
+    ObLocationService *location_service = nullptr;
+    bool is_cache_hit = false;
+    ObLSService *ls_service = nullptr;
+    ObLS *ls = nullptr;
+    LOG_INFO("init writer", K(rowkey_column_num_), K(extra_rowkey_column_num_), K(column_count_));
+    if (OB_ISNULL(location_service = GCTX.location_service_)) {
+      ret = OB_ERR_SYS;
+      LOG_WARN("location service is null", KR(ret), KP(location_service));
+    } else if (OB_ISNULL(ls_service = MTL(ObLSService *))) {
+      ret = OB_ERR_SYS;
+      LOG_ERROR("ls service is null", KR(ret));
+    } else if (OB_FAIL(ls_service->get_ls(ls_id_, ls_handle_, ObLSGetMod::STORAGE_MOD))) {
+      LOG_WARN("fail to get ls", KR(ret), K(ls_id_));
+    } else if (OB_ISNULL(ls = ls_handle_.get_ls())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_ERROR("ls should not be null", KR(ret));
+    } else if (OB_FAIL(ls->get_tablet(tablet_id_, tablet_handle_))) {
+      LOG_WARN("fail to get tablet handle", KR(ret), K(tablet_id_));
+    } else if (OB_FAIL(init_sstable_index_builder(table_schema))) {
+      LOG_WARN("fail to init sstable index builder", KR(ret));
+    } else if (OB_FAIL(init_macro_block_writer(table_schema))) {
+      LOG_WARN("fail to init macro block writer", KR(ret));
+    } else if (OB_FAIL(datum_row_.init(column_count_ + extra_rowkey_column_num_))) {
+      LOG_WARN("fail to init datum row", KR(ret));
+    } else {
+      share::SCN max_committed_txn_version = MTL(transaction::ObTransService*)->
+        get_tx_version_mgr().get_max_commit_ts(false/*elr*/);
+      
+      table_key_.table_type_ = ObITable::MAJOR_SSTABLE;
+      table_key_.tablet_id_ = tablet_id_;
+      table_key_.version_range_.snapshot_version_ = max_committed_txn_version.get_val_for_tx();
+      datum_row_.row_flag_.set_flag(ObDmlFlag::DF_INSERT);
+      datum_row_.mvcc_row_flag_.set_last_multi_version_row(true);
+      datum_row_.storage_datums_[rowkey_column_num_].set_int(-1); // fill trans_version
+      datum_row_.storage_datums_[rowkey_column_num_ + 1].set_int(0); // fill sql_no
+      is_inited_ = true;
+    }
+  }
+  return ret;
+}
+
+int ObLoadSSTableWriter::init_sstable_index_builder(const ObTableSchema *table_schema)
+{
+  int ret = OB_SUCCESS;
+  ObDataStoreDesc data_desc;
+  if (OB_FAIL(data_desc.init(*table_schema, ls_id_, tablet_id_, MAJOR_MERGE, 1L))) {
+    LOG_WARN("fail to init data desc", KR(ret));
+  } else {
+    data_desc.row_column_count_ = data_desc.rowkey_column_count_ + 1;
+    data_desc.need_prebuild_bloomfilter_ = false;
+    data_desc.col_desc_array_.reset();
+    if (OB_FAIL(data_desc.col_desc_array_.init(data_desc.row_column_count_))) {
+      LOG_WARN("fail to reserve column desc array", KR(ret));
+    } else if (OB_FAIL(table_schema->get_rowkey_column_ids(data_desc.col_desc_array_))) {
+      LOG_WARN("fail to get rowkey column ids", KR(ret));
+    } else if (OB_FAIL(
+                 ObMultiVersionRowkeyHelpper::add_extra_rowkey_cols(data_desc.col_desc_array_))) {
+      LOG_WARN("fail to add extra rowkey cols", KR(ret));
+    } else {
+      ObObjMeta meta;
+      meta.set_varchar();
+      meta.set_collation_type(CS_TYPE_BINARY);
+      ObColDesc col;
+      // temp
+      col.col_id_ = static_cast<uint32_t>(data_desc.row_column_count_ + OB_APP_MIN_COLUMN_ID);
+      col.col_type_ = meta;
+      col.col_order_ = DESC;
+      if (OB_FAIL(data_desc.col_desc_array_.push_back(col))) {
+        LOG_WARN("fail to push back last col for index", KR(ret), K(col));
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(sstable_index_builder_.init(data_desc, NULL, ObSSTableIndexBuilder::ObSpaceOptimizationMode::DISABLE))) {
+      LOG_WARN("fail to init index builder", KR(ret), K(data_desc));
+    }
+  }
+  LOG_INFO("init index builder success", K(data_desc));
+  return ret;
+}
+
+int ObLoadSSTableWriter::init_macro_block_writer(const ObTableSchema *table_schema)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(data_store_desc_.init(*table_schema, ls_id_, tablet_id_, MAJOR_MERGE, 1))) {
+    LOG_WARN("fail to init data_store_desc", KR(ret), K(tablet_id_));
+  } else {
+    data_store_desc_.sstable_index_builder_ = &sstable_index_builder_;
+  }
+  if (OB_SUCC(ret)) {
+    ObMacroDataSeq data_seq;
+    if (OB_FAIL(macro_block_writer_.open(data_store_desc_, data_seq))) {
+      LOG_WARN("fail to init macro block writer", KR(ret), K(data_store_desc_), K(data_seq));
+    }
+  }
+  return ret;
+}
+
+int ObLoadSSTableWriter::append_row(const ObLoadDatumRow &datum_row)
+{
+  int ret = OB_SUCCESS;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ObLoadSSTableWriter not init", KR(ret), KP(this));
+  } else if (OB_UNLIKELY(is_closed_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected closed external sort", KR(ret));
+  } else if (OB_UNLIKELY(!datum_row.is_valid() || datum_row.count_ != column_count_)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid args", KR(ret), K(datum_row), K(column_count_));
+  } else {
+    for (int64_t i = 0; i < column_count_; ++i) {
+      if (i < rowkey_column_num_) {
+        datum_row_.storage_datums_[i] = datum_row.datums_[i];
+      } else {
+        datum_row_.storage_datums_[i + extra_rowkey_column_num_] = datum_row.datums_[i];
+      }
+    }
+
+    // int64_t item_0 = datum_row_.storage_datums_[0].get_int();
+    // int64_t item_1 = datum_row_.storage_datums_[1].get_int();
+    // int64_t item_2 = datum_row_.storage_datums_[2].get_int();
+    // LOG_INFO("appen row", K(item_0), K(item_1), K(item_2));
+
+    const common::ObIArray<share::schema::ObColDesc> *col_descs = &data_store_desc_.get_full_stored_col_descs();
+
+    for (int64_t i = 0; OB_SUCC(ret) && i < col_descs->count(); i++) {
+      ObStorageDatum &datum = datum_row_.storage_datums_[i];
+      if (col_descs->at(i).col_type_.is_lob_storage() && !datum.is_nop() && !datum.is_null()) {
+        // lob_cnt_++;
+        const int64_t timeout_ts =
+          ObTimeUtility::current_time() + ObInsertLobColumnHelper::LOB_ACCESS_TX_TIMEOUT;
+        bool has_lob_header = false; // store_row_.row_val_.cells_[i].has_lob_header();
+        if (OB_FAIL(ObInsertLobColumnHelper::insert_lob_column(
+              lob_allocator_, ls_id_, tablet_id_, col_descs->at(i), datum, timeout_ts, has_lob_header,
+              MTL_ID()))) {
+          LOG_WARN("fail to insert_lob_col", KR(ret), K(datum));
+        }
+      }
+    }
+    if (OB_FAIL(macro_block_writer_.append_row(datum_row_))) {
+      LOG_WARN("fail to append row", KR(ret));
+    }
+  }
+  return ret;
+}
+
+int ObLoadSSTableWriter::create_sstable()
+{
+  int ret = OB_SUCCESS;
+  ObTableHandleV2 table_handle;
+
+  blocksstable::ObSSTable sstable;
+
+
+  SMART_VAR(ObSSTableMergeRes, merge_res)
+  {
+    const ObStorageSchema *storage_schema;
+    tablet_handle_.get_obj()->load_storage_schema(*tablet_handle_.get_allocator(), storage_schema);
+    int64_t column_count = 0;
+    if (OB_FAIL(storage_schema->get_stored_column_count_in_sstable(column_count))) {
+      LOG_WARN("fail to get stored column count in sstable", KR(ret));
+    } else if (OB_FAIL(sstable_index_builder_.close(merge_res))) {
+      LOG_WARN("fail to close sstable index builder", KR(ret));
+    } else {
+      ObTabletCreateSSTableParam create_param;
+      create_param.table_key_ = table_key_;
+      create_param.table_mode_ = storage_schema->get_table_mode_struct();
+      create_param.index_type_ = storage_schema->get_index_type();
+      create_param.rowkey_column_cnt_ = storage_schema->get_rowkey_column_num() +
+                                        ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt();
+      create_param.schema_version_ = storage_schema->get_schema_version();
+      create_param.create_snapshot_version_ = 0;
+      ObSSTableMergeRes::fill_addr_and_data(merge_res.root_desc_, create_param.root_block_addr_,
+                                            create_param.root_block_data_);
+      ObSSTableMergeRes::fill_addr_and_data(merge_res.data_root_desc_,
+                                            create_param.data_block_macro_meta_addr_,
+                                            create_param.data_block_macro_meta_);
+      create_param.root_row_store_type_ = merge_res.root_row_store_type_;
+      create_param.data_index_tree_height_ = merge_res.root_desc_.height_;
+      create_param.index_blocks_cnt_ = merge_res.index_blocks_cnt_;
+      create_param.data_blocks_cnt_ = merge_res.data_blocks_cnt_;
+      create_param.micro_block_cnt_ = merge_res.micro_block_cnt_;
+      create_param.use_old_macro_block_count_ = merge_res.use_old_macro_block_count_;
+      create_param.row_count_ = merge_res.row_count_;
+      create_param.column_cnt_ = merge_res.data_column_cnt_;
+      create_param.data_checksum_ = merge_res.data_checksum_;
+      create_param.occupy_size_ = merge_res.occupy_size_;
+      create_param.original_size_ = merge_res.original_size_;
+      create_param.max_merged_trans_version_ = merge_res.max_merged_trans_version_;
+      create_param.contain_uncommitted_row_ = merge_res.contain_uncommitted_row_;
+      create_param.compressor_type_ = merge_res.compressor_type_;
+      create_param.encrypt_id_ = merge_res.encrypt_id_;
+      create_param.master_key_id_ = merge_res.master_key_id_;
+      create_param.data_block_ids_ = merge_res.data_block_ids_;
+      create_param.other_block_ids_ = merge_res.other_block_ids_;
+      create_param.latest_row_store_type_ = storage_schema->get_row_store_type();
+      MEMCPY(create_param.encrypt_key_, merge_res.encrypt_key_,
+             OB_MAX_TABLESPACE_ENCRYPT_KEY_LENGTH);
+      create_param.column_checksums_.assign(merge_res.data_column_checksums_);
+      LOG_INFO("create sstable", K(create_param));
+      if (OB_FAIL(ObTabletCreateDeleteHelper::create_sstable(create_param, *tablet_handle_.get_allocator(), sstable))) {
+        LOG_WARN("fail to create sstable", KR(ret), K(create_param));
+      } else {
+        table_handle.set_sstable(&sstable, tablet_handle_.get_allocator());
+
+        const int64_t rebuild_seq = ls_handle_.get_ls()->get_rebuild_seq();
+        ObTabletHandle new_tablet_handle;
+        ObUpdateTableStoreParam table_store_param(&sstable,
+                                                  tablet_handle_.get_obj()->get_snapshot_version(),
+                                                  false, rebuild_seq, storage_schema, true, MAJOR_MERGE, true);
+        if (OB_FAIL(ls_handle_.get_ls()->update_tablet_table_store(tablet_id_, table_store_param,
+                                                                   new_tablet_handle))) {
+          LOG_WARN("fail to update tablet table store", KR(ret), K(tablet_id_),
+                   K(table_store_param));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObLoadSSTableWriter::close()
+{
+  int ret = OB_SUCCESS;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ObLoadSSTableWriter not init", KR(ret), KP(this));
+  } else if (OB_UNLIKELY(is_closed_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected closed sstable writer", KR(ret));
+  } else {
+    ObSSTable *sstable = nullptr;
+    if (OB_FAIL(macro_block_writer_.close())) {
+      LOG_WARN("fail to close macro block writer", KR(ret));
+    } else if (OB_FAIL(create_sstable())) {
+      LOG_WARN("fail to create sstable", KR(ret));
+    } else {
+      is_closed_ = true;
+    }
+  }
+  return ret;
+}
+
+
+class ObLoadDirectAddColumns {
+public:
+  int init(const ObTableSchema *schema);
+  int add_item(const ObLoadDatumRow &row);
+  int do_load();
+private:
+private:
+  common::ObArenaAllocator allocator_;
+  blocksstable::ObStorageDatumUtils datum_utils_;
+  ObLoadDatumRowCompare compare_;
+  common::ObVector<const ObLoadDatumRow *> item_list_;
+  ObLoadSSTableWriter sstable_writer_;
+};
+
+int ObLoadDirectAddColumns::init(const ObTableSchema *schema)
+{
+  int ret = OB_SUCCESS;
+  allocator_.set_tenant_id(MTL_ID());
+  const int64_t rowkey_column_num = schema->get_rowkey_column_num();
+  ObArray<ObColDesc> multi_version_column_descs;
+  if (OB_FAIL(schema->get_multi_version_column_descs(multi_version_column_descs))) {
+    LOG_WARN("fail to get multi version column descs", KR(ret));
+  }
+  for (int i = 0; i < 3; i++) {
+    ObColDesc &desc = multi_version_column_descs.at(i);
+    LOG_INFO("row key descs", K(i), K(desc.col_id_), K(desc.col_type_));
+  }
+  if (FAILEDx(datum_utils_.init(multi_version_column_descs, rowkey_column_num,
+                                        is_oracle_mode(), allocator_))) {
+    LOG_WARN("fail to init datum utils", KR(ret));
+  } else if (OB_FAIL(compare_.init(rowkey_column_num, &datum_utils_))) {
+    LOG_WARN("fail to init compare", KR(ret));
+  } else if (OB_FAIL(sstable_writer_.init(schema))) {
+    LOG_WARN("fail to init sstablw", KR(ret));
+  }
+  return ret;
+}
+
+int ObLoadDirectAddColumns::add_item(const ObLoadDatumRow &row)
+{
+  int ret = common::OB_SUCCESS;
+  const int64_t item_size = sizeof(ObLoadDatumRow) + row.get_deep_copy_size();
+  char *buf = NULL;
+  ObLoadDatumRow *new_item = NULL;
+  if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(item_size)))) {
+    ret = common::OB_ALLOCATE_MEMORY_FAILED;
+    STORAGE_LOG(WARN, "fail to allocate memory", K(ret), K(item_size));
+  } else if (OB_ISNULL(new_item = new (buf) ObLoadDatumRow())) {
+    ret = common::OB_ALLOCATE_MEMORY_FAILED;
+    STORAGE_LOG(WARN, "fail to placement new item", K(ret));
+  } else {
+    int64_t buf_pos = sizeof(ObLoadDatumRow);
+    if (OB_FAIL(new_item->deep_copy(row, buf, item_size, buf_pos))) {
+      STORAGE_LOG(WARN, "fail to deep copy item", K(ret));
+    } else if (OB_FAIL(item_list_.push_back(new_item))) {
+      STORAGE_LOG(WARN, "fail to push back new item", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObLoadDirectAddColumns::do_load()
+{
+  int ret = OB_SUCCESS ;
+  LOG_INFO("do load size", K(item_list_.size()));
+  std::sort(item_list_.begin(), item_list_.end(), compare_);
+  for (int i = 0; OB_SUCC(ret) && (i < item_list_.size()); i++) {
+    if (OB_FAIL(sstable_writer_.append_row(*item_list_.at(i)))) {
+      LOG_WARN("fail to append row", KR(ret));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(sstable_writer_.close())) {
+      LOG_WARN("fail to close sstable writer", KR(ret));
+    }
+  }
+  return ret;
+}
+
+int ObDDLService::create_schemas_add_columns_direct_load(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, ObTableSchema* schema, ObTableSchema* history_schema)
+{
+  int ret = OB_SUCCESS;
+  ObLoadDirectAddColumns load;
+  ObLoadDirectAddColumns history_load;
+  ObLoadDatumRow row;
+  ObLoadDatumRow history_row;
+  const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
+  if (OB_FAIL(load.init(schema))) {
+    LOG_WARN("fail to init load unit", KR(ret));
+  } else if (OB_FAIL(row.init(schema->get_column_count()))) {
+    LOG_WARN("fail to init datum row", KR(ret));
+  } else if (OB_FAIL(history_load.init(history_schema))) {
+    LOG_WARN("fail to init load unit", KR(ret));
+  } else if (OB_FAIL(history_row.init(history_schema->get_column_count()))) {
+    LOG_WARN("fail to init datum row", KR(ret));
+  } else {
+    for (int i = 0; i < table_schemas.count(); i++) {
+      ObTableSchema &table = *table_schemas.at(i);
+      if (table.is_view_table() && !table.view_column_filled()) {
+        continue;
+      }
+      for (ObTableSchema::const_column_iterator iter = table.column_begin();
+        OB_SUCCESS == ret && iter != table.column_end(); ++iter) {
+        if (OB_ISNULL(*iter)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("iter is NULL", K(ret));
+        } else {
+          ObColumnSchemaV2 column = (**iter);
+          column.set_schema_version(table.get_schema_version());
+          column.set_tenant_id(table.get_tenant_id());
+          column.set_table_id(table.get_table_id());
+          gen_column_dml_for_load_data_datum(exec_tenant_id, column, schema, row, history_schema, history_row);
+          load.add_item(row);
+          history_load.add_item(history_row);
+        }
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(load.do_load())) {
+      LOG_WARN("failed to do load", KR(ret));
+    } else if (OB_FAIL(history_load.do_load())) {
+      LOG_WARN("failed to do load for history", KR(ret));
+    }
+  }
+
+  return ret;
+}
+
+
 int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, const int64_t begin, const int64_t end, bool core_table)
 {
   int ret = OB_SUCCESS;
@@ -23750,8 +24699,6 @@ int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTable
     ObMySQLTransaction trans(true);
     if (OB_FAIL(trans.start(sql_proxy_, tenant_id))) {
       LOG_WARN("start transaction failed", KR(ret));
-    } else if (!core_table && OB_FAIL(trans.enable_async(sql_proxy_, tenant_id))) {
-      LOG_WARN("enable async failed", KR(ret));
     } else {
       for (int64_t idx = begin;idx < end && OB_SUCC(ret); idx++) {
         ObTableSchema &table = *table_schemas.at(idx);
@@ -23848,9 +24795,9 @@ void ob_pthread_join(void *ptr);
 // 如果没有相关性，可以直接以 batch 为单位并行
 int ObDDLService::parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas)
 {
-  int THREAD_NUM = 4;
+  int THREAD_NUM = 8;
   if (is_sys_tenant(tenant_id)) {
-    THREAD_NUM = 8;
+    THREAD_NUM = 16;
   }
   
   int ret = OB_SUCCESS;
@@ -24032,9 +24979,20 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   // bool wait_for_sync = enable_meta_user_parallel_ && is_user_tenant(tenant_id);
   // bool generate_sync = enable_meta_user_parallel_ && is_meta_tenant(tenant_id);
 
+  ObTableSchema all_column_schema;
+  ObTableSchema all_column_history_schema;
+
   std::unordered_map<uint64_t, ObTableSchema*> table_maps;
   for (int i = 0; i < table_schemas.count(); i++) {
     ObTableSchema &table = table_schemas.at(i);
+    if (table.get_table_id() == OB_ALL_COLUMN_TID) {
+      all_column_schema.assign(table);
+      all_column_schema.set_schema_version(2);
+    }
+    if (table.get_table_id() == OB_ALL_COLUMN_HISTORY_TID) {
+      all_column_history_schema.assign(table);
+      all_column_history_schema.set_schema_version(2);
+    }
     int64_t new_schema_version;
     if (OB_FAIL(schema_service_->gen_new_schema_version(tenant_id, new_schema_version))) {
       LOG_WARN("fail to gen new schema_version", K(ret), K(tenant_id));
@@ -24072,16 +25030,57 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   table_ids.insert(tmp_ids.begin(), tmp_ids.end());
 
   // all other tables
-  if (OB_FAIL(parallel_create_schemas(tenant_id, next_round_tables))) {
+  if (FAILEDx(parallel_create_schemas(tenant_id, next_round_tables))) {
     LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
-    return ret;
+  }
+
+  MTL_SWITCH(tenant_id) {
+    if (FAILEDx(create_schemas_add_columns_direct_load(tenant_id, next_round_tables, &all_column_schema, &all_column_history_schema))) {
+      LOG_WARN("create_schemas_add_columns_direct_load failed", KR(ret));
+    }
   }
 
   // core table
-  if (OB_FAIL(batch_create_schema_local(tenant_id, this_round_tables, 0, this_round_tables.count(), true))) {
+  if (FAILEDx(batch_create_schema_local(tenant_id, this_round_tables, 0, this_round_tables.count(), true))) {
     LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
-    return ret;
   }
+
+  // ObMySQLTransaction trans(true);
+  // common::sqlclient::ObMySQLResult *result = NULL;
+  // if (OB_FAIL(trans.start(sql_proxy_, tenant_id))) {
+  //   LOG_WARN("start transaction failed", KR(ret));
+  // } else {
+  //   ObSqlString sql;
+  //   ObMySQLProxy::MySQLResult res;
+  //   sql.append("SELECT * FROM __all_column_history");
+  //   trans.read(res, tenant_id, sql.ptr());
+
+  //   if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
+  //     ret = OB_ERR_UNEXPECTED;
+  //     LOG_WARN("fail to get result. ", K(ret));
+  //   } else {
+  //     int i = 0;
+  //     while (OB_SUCC(result->next())) {
+  //       int64_t item_2;
+  //       int64_t item_3;
+  //       int64_t item_4;
+  //       int64_t item_5;
+  //       int64_t item_6;
+  //       result->get_int(2, item_2);
+  //       result->get_int(3, item_3);
+  //       result->get_int(4, item_4);
+  //       result->get_int(5, item_5);
+  //       result->get_int(6, item_6);
+  //       if ((item_3 == 11092) || (i % 100 == 0) || (item_3 < 100)) {
+  //         LOG_INFO("get row", K(item_2), K(item_3), K(item_5), K(item_6));
+  //       }
+  //       i++;
+  //     }
+  //     LOG_INFO("result number", K(i));
+
+  //     ret = OB_SUCCESS;
+  //   }
+  // }
 
   // if (enable_meta_user_parallel_) {
   //   ATOMIC_AAF(&meta_user_core_count_, 1);

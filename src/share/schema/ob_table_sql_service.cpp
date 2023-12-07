@@ -2764,7 +2764,7 @@ int ObTableSqlService::create_table_for_create_schemas(ObTableSchema &table,
     cost_usec = end_usec - start_usec;
     start_usec = end_usec;
     LOG_INFO("add_table cost: ", K(cost_usec));
-    if (OB_FAIL(add_columns(sql_client, table))) {
+    if (is_core_table(table.get_table_id()) && OB_FAIL(add_columns(sql_client, table))) {
       LOG_WARN("insert column schema failed, ", K(ret), "table", to_cstring(table));
     } else if (OB_FAIL(add_constraints(sql_client, table))) {
       LOG_WARN("insert constraint schema failed, ", K(ret), "table", to_cstring(table));
@@ -2794,7 +2794,7 @@ int ObTableSqlService::create_table_for_create_schemas(ObTableSchema &table,
     start_usec = end_usec;
     LOG_INFO("add_table cost: ", K(cost_usec));
     if (table.view_column_filled() //view table
-             && OB_FAIL(add_columns(sql_client, table))) {
+             && is_core_table(table.get_table_id()) && OB_FAIL(add_columns(sql_client, table))) {
       LOG_WARN("insert column schema failed, ", K(ret), "table", to_cstring(table));
     }
     end_usec = ObTimeUtility::current_time();

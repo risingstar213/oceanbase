@@ -85,6 +85,7 @@ struct ObDataStoreDesc
   common::ObArenaAllocator allocator_;
   common::ObFixedArray<int64_t, common::ObIAllocator> col_default_checksum_array_;
   blocksstable::ObStorageDatumUtils datum_utils_;
+  common::ObFixedArray<share::schema::ObColDesc, common::ObIAllocator> col_desc_array_;
   ObDataStoreDesc();
   ~ObDataStoreDesc();
   //ATTENSION!!! Only decreasing count of parameters is acceptable
@@ -186,7 +187,6 @@ private:
     const share::schema::ObMergeSchema &merge_schema,
     const bool init_by_schema);
 private:
-  common::ObFixedArray<share::schema::ObColDesc, common::ObIAllocator> col_desc_array_;
   DISALLOW_COPY_AND_ASSIGN(ObDataStoreDesc);
 };
 

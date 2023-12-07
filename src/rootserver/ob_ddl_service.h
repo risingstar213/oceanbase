@@ -2068,6 +2068,8 @@ private:
       ObDDLOperator &ddl_operator,
       ObMySQLTransaction &trans,
       common::ObIArray<share::schema::ObTableSchema> &tables);
+  
+  int create_schemas_add_columns_direct_load(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, ObTableSchema* schema, ObTableSchema* history_schema);
   int parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas);
   int parallel_create_schemas_with_core(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, ObIArray<ObTableSchema*> &core_table_schemas);
 
