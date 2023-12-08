@@ -142,7 +142,7 @@ int ObSchemaRetrieveUtils::retrieve_schema(
     SCHEMA &current = helper.get_current();
     current.reset();
     if (OB_FAIL(helper.fill_current(tenant_id, check_deleted, result, current, is_deleted))) {
-      SHARE_SCHEMA_LOG(WARN, "fill schema failed", K(ret));
+      SHARE_SCHEMA_LOG(WARN, "fill schema failed", K(ret), K(current.get_table_id()), K(last_table_id));
     } else if (current.get_table_id() == last_table_id
                && helper.get_curr_schema_id() == last_schema_id) {
       //the same with last schema, continue;

@@ -2585,7 +2585,7 @@ int ObMultiVersionSchemaService::refresh_and_add_schema_with_ready_schemas(const
     LOG_WARN("inner stat error", K(ret));
   } else {
     lib::ObMutexGuard guard(schema_refresh_mutex_);
-    refresh_schema_with_ready_schemas_ = true;
+    refresh_schema_with_ready_schemas_ = false;
     schemas_ready_to_refresh_ = &schemas_ready_to_refresh;
     auto func = [&]() {
       ObSchemaStatusProxy *schema_status_proxy = GCTX.schema_status_proxy_;

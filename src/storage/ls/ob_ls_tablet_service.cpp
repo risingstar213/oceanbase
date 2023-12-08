@@ -2591,6 +2591,7 @@ int ObLSTabletService::insert_rows(
   int64_t afct_num = 0;
   int64_t dup_num = 0;
   ObTimeGuard timeguard(__func__, 3 * 1000 * 1000);
+  LOG_INFO("insert_rows", K(dml_param));
 
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
