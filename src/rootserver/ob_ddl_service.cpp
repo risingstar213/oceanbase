@@ -24288,7 +24288,7 @@ int ObLoadSSTableWriter::close()
 class ObLoadDirectAddColumns {
 public:
   int init(int64_t table_id);
-  int add_item(const ObLoadDatumRow &row);
+  int add_item(ObObj* row);
   int do_load();
 private:
 private:
@@ -24343,11 +24343,33 @@ int ObLoadDirectAddColumns::init(int64_t table_id)
   return ret;
 }
 
-int ObLoadDirectAddColumns::add_item(const ObLoadDatumRow &row)
+int ObLoadDirectAddColumns::add_item(ObObj* row)
 {
-  common::ObSpinLockGuard guard(lock_);
   int ret = common::OB_SUCCESS;
-  const int64_t item_size = sizeof(ObLoadDatumRow) + row.get_deep_copy_size();
+  for (int i = 0; i < descs_.count(); i++) {
+    if (row[i].is_null()) {
+      continue;
+    }
+    row[i].set_collation_type(descs_[i].col_type_.get_collation_type());
+    row[i].set_collation_level(descs_[i].col_type_.get_collation_level());
+  }
+
+  ObLoadDatumRow load_dutam;
+  if (OB_FAIL(load_dutam.init(descs_.count()))) {
+    LOG_WARN("fail to init datum row", KR(ret));
+  }
+
+  for (int i = 0; i < descs_.count(); i++) {
+    const ObObj &src_obj = row[i];
+    ObStorageDatum &dest_datum = load_dutam.datums_[i];
+    if (OB_FAIL(dest_datum.from_obj_enhance(src_obj))) {
+      LOG_WARN("fail to from obj enhance", KR(ret), K(src_obj));
+    }
+  }
+
+  
+  common::ObSpinLockGuard guard(lock_);
+  const int64_t item_size = sizeof(ObLoadDatumRow) + load_dutam.get_deep_copy_size();
   char *buf = NULL;
   ObLoadDatumRow *new_item = NULL;
   if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(item_size)))) {
@@ -24358,7 +24380,7 @@ int ObLoadDirectAddColumns::add_item(const ObLoadDatumRow &row)
     STORAGE_LOG(WARN, "fail to placement new item", K(ret));
   } else {
     int64_t buf_pos = sizeof(ObLoadDatumRow);
-    if (OB_FAIL(new_item->deep_copy(row, buf, item_size, buf_pos))) {
+    if (OB_FAIL(new_item->deep_copy(load_dutam, buf, item_size, buf_pos))) {
       STORAGE_LOG(WARN, "fail to deep copy item", K(ret));
     } else if (OB_FAIL(item_list_.push_back(new_item))) {
       STORAGE_LOG(WARN, "fail to push back new item", K(ret));
@@ -24662,26 +24684,15 @@ int gen_column_dml_for_load_data_datum(
   ObLoadDirectAddColumns &idx_tb_col_name_load,
   ObLoadDirectAddColumns &idx_col_name_load)
 {
-  int ret = OB_SUCCESS;
+   int ret = OB_SUCCESS;
   ObString orig_default_value;
   ObString cur_default_value;
   ObArenaAllocator allocator(ObModIds::OB_SCHEMA_OB_SCHEMA_ARENA);
   char *extended_type_info_buf = NULL;
   uint64_t tenant_data_version = 0;
   ObObj *cells = (ObObj *)allocator.alloc(sizeof(ObObj) * 33);
-
-  ObLoadDatumRow row;
-  ObLoadDatumRow history_row;
-  ObLoadDatumRow idx_row;
-
-  if (OB_FAIL(row.init(32))) {
-    LOG_WARN("fail to init datum row", KR(ret));
-  } else if (OB_FAIL(history_row.init(33))) {
-    LOG_WARN("fail to init datum row", KR(ret));
-  } else if (OB_FAIL(idx_row.init(4))) {
-    LOG_WARN("fail to init datum row", KR(ret));
-  }
-
+  ObObj *history_cells = (ObObj *)allocator.alloc(sizeof(ObObj) * 33);
+  ObObj *idx_cells = (ObObj *)allocator.alloc(sizeof(ObObj) * 4);
 
   if (OB_FAIL(GET_MIN_DATA_VERSION(exec_tenant_id, tenant_data_version))) {
     LOG_WARN("get tenant data version failed", K(ret));
@@ -24787,7 +24798,7 @@ int gen_column_dml_for_load_data_datum(
     if (OB_SUCC(ret)) {
       cells[0].set_int(ObIntType, ObSchemaUtils::get_extract_tenant_id(exec_tenant_id, column.get_tenant_id()));
       cells[1].set_int(ObIntType, ObSchemaUtils::get_extract_schema_id(exec_tenant_id, column.get_table_id()));
-      cells[2].set_int(ObIntType, column.get_column_id());    
+      cells[2].set_int(ObIntType, column.get_column_id());
       cells[3].set_timestamp(ObTimeUtility::current_time());
       cells[4].set_timestamp(ObTimeUtility::current_time());
       cells[5].set_varchar(column.get_column_name());
@@ -24840,41 +24851,22 @@ int gen_column_dml_for_load_data_datum(
       cells[32].set_int(ObIntType, false); // is deleted
     }
 
-    for (int i = 0; i < 32; i++) {
-      const ObObj &src_obj = cells[i];
-      ObStorageDatum &dest_datum = row.datums_[i];
-      if (OB_FAIL(dest_datum.from_obj_enhance(src_obj))) {
-        LOG_WARN("fail to from obj enhance", KR(ret), K(src_obj));
-      }
-    }
-    load.add_item(row);
+    load.add_item(cells);
 
     for (int i = 0; i < 33; i++) {
-      const ObObj &src_obj = cells[hist_idx_in_cells[i]];
-      ObStorageDatum &dest_datum = history_row.datums_[i];
-      if (OB_FAIL(dest_datum.from_obj_enhance(src_obj))) {
-        LOG_WARN("fail to from obj enhance", KR(ret), K(src_obj));
-      }
+      history_cells[i] = cells[hist_idx_in_cells[i]];
     }
-    history_load.add_item(history_row);
+    history_load.add_item(history_cells);
 
     for (int i = 0; i < 4; i++) {
-      const ObObj &src_obj = cells[tb_col_name_idx_in_cells[i]];
-      ObStorageDatum &dest_datum = idx_row.datums_[i];
-      if (OB_FAIL(dest_datum.from_obj_enhance(src_obj))) {
-        LOG_WARN("fail to from obj enhance", KR(ret), K(src_obj));
-      }
+      idx_cells[i] = cells[tb_col_name_idx_in_cells[i]];
     }
-    idx_tb_col_name_load.add_item(idx_row);
+    idx_tb_col_name_load.add_item(idx_cells);
 
     for (int i = 0; i < 4; i++) {
-      const ObObj &src_obj = cells[col_name_idx_in_cells[i]];
-      ObStorageDatum &dest_datum = idx_row.datums_[i];
-      if (OB_FAIL(dest_datum.from_obj_enhance(src_obj))) {
-        LOG_WARN("fail to from obj enhance", KR(ret), K(src_obj));
-      }
+      idx_cells[i] = cells[col_name_idx_in_cells[i]];
     }
-    idx_col_name_load.add_item(idx_row);
+    idx_col_name_load.add_item(idx_cells);
   }
 
   return ret;
@@ -25587,7 +25579,7 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   }
 
   MTL_SWITCH(tenant_id) {
-    if (FAILEDx(create_schemas_add_columns_insert_memtable(tenant_id, next_round_tables))) {
+    if (FAILEDx(create_schemas_add_columns_direct_load(tenant_id, next_round_tables))) {
       LOG_WARN("create_schemas_add_columns_insert_memtable failed", KR(ret));
     }
   }
