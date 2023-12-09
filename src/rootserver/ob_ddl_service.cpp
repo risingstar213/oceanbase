@@ -24431,7 +24431,7 @@ int ObInsertMemtableIterator::init(common::ObSArray<ObColDesc> &descs)
   for (int i = 0; i < descs.count(); i++) {
     descs_.push_back(descs.at(i));
   }
-  LOG_INFO("add descs", K(descs.count()));
+  // LOG_INFO("add descs", K(descs.count()));
   return ret;
 }
 
@@ -24496,7 +24496,7 @@ class ObInsertMemtableAddColumns
 public:
   ObInsertMemtableAddColumns() : table_param_(allocator_) {}
   int init(int table_id);
-  int do_load(ObMySQLProxy *sql_proxy, int tenant_id);
+  int do_load(ObMySQLTransaction &trans);
 
   int append_row(ObNewRow &new_row);
 private:
@@ -24540,7 +24540,7 @@ int ObInsertMemtableAddColumns::init(int table_id)
   }
   for (int i = 0; i < descs_.count(); i++) {
     column_ids_.push_back(descs_.at(i).col_id_);
-    LOG_INFO("add col id", K(i), K(descs_.at(i).col_id_));
+    // LOG_INFO("add col id", K(i), K(descs_.at(i).col_id_));
   }
 
   ls_id_ = 1;
@@ -24548,7 +24548,7 @@ int ObInsertMemtableAddColumns::init(int table_id)
   return ret;
 }
 
-int ObInsertMemtableAddColumns::do_load(ObMySQLProxy *sql_proxy, int tenant_id)
+int ObInsertMemtableAddColumns::do_load(ObMySQLTransaction &trans)
 {
   int ret = OB_SUCCESS;
   // check type
@@ -24578,10 +24578,6 @@ int ObInsertMemtableAddColumns::do_load(ObMySQLProxy *sql_proxy, int tenant_id)
   // }
 
 
-  ObMySQLTransaction trans(true);
-  if (trans.start(sql_proxy, tenant_id)) {
-    LOG_INFO("do load start trans failed", K(ret));
-  }
   // int sessid = trans.get_connection()->get_sessid();
   observer::ObInnerSQLConnection *connection = dynamic_cast<observer::ObInnerSQLConnection *>(trans.get_connection());
   if (connection == NULL) {
@@ -24610,12 +24606,6 @@ int ObInsertMemtableAddColumns::do_load(ObMySQLProxy *sql_proxy, int tenant_id)
     LOG_WARN("as insert rows error", K(ret));
   } else {
     LOG_INFO("insert successfully", K(affect_rows));
-  }
-
-  if (OB_SUCC(ret) && trans.is_started()) {
-    if (OB_FAIL(trans.end(true))) {
-      LOG_INFO("trans commit failed!", K(ret));
-    }
   }
 
   return ret;
@@ -25073,7 +25063,7 @@ int gen_column_dml_for_new_row(
   return ret;
 }
 
-int ObDDLService::create_schemas_add_columns_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas)
+int ObDDLService::create_schemas_add_columns_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, int begin, int end)
 {
   int ret = OB_SUCCESS;
   ObInsertMemtableAddColumns load;
@@ -25092,7 +25082,7 @@ int ObDDLService::create_schemas_add_columns_insert_memtable(uint64_t tenant_id,
   }
 
   const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
-  for (int i = 0; i < table_schemas.count(); i++) {
+  for (int i = begin; i < end; i++) {
     ObTableSchema &table = *table_schemas.at(i);
     if (table.is_view_table() && !table.view_column_filled()) {
       continue;
@@ -25112,19 +25102,63 @@ int ObDDLService::create_schemas_add_columns_insert_memtable(uint64_t tenant_id,
     }
   }
 
-  if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(load.do_load(sql_proxy_, tenant_id))) {
+  ObMySQLTransaction trans(true);
+  if (FAILEDx(trans.start(sql_proxy_, tenant_id))) {
+    LOG_INFO("do load start trans failed", K(ret));
+  } else if (OB_FAIL(load.do_load(trans))) {
     LOG_WARN("failed to do load", KR(ret));
-  } else if (OB_FAIL(history_load.do_load(sql_proxy_, tenant_id))) {
+  } else if (OB_FAIL(history_load.do_load(trans))) {
     LOG_WARN("failed to do load for history", KR(ret));
-  } else if (OB_FAIL(idx_tb_col_name_load.do_load(sql_proxy_, tenant_id))) {
+  } else if (OB_FAIL(idx_tb_col_name_load.do_load(trans))) {
     LOG_WARN("failed to do load idx 1", KR(ret));
-  } else if (OB_FAIL(idx_col_name_load.do_load(sql_proxy_, tenant_id))) {
+  } else if (OB_FAIL(idx_col_name_load.do_load(trans))) {
     LOG_WARN("failed to do load idx 2", KR(ret));
+  }
+
+  if (OB_SUCC(ret) && trans.is_started()) {
+    if (OB_FAIL(trans.end(true))) {
+      LOG_INFO("trans commit failed!", K(ret));
+    }
   }
   return ret;
 }
 
+int ObDDLService::parallel_create_schemas_add_columns_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas)
+{
+  int THREAD_NUM = 8;
+  if (is_sys_tenant(tenant_id)) {
+    THREAD_NUM = 16;
+  }
+
+  int ret = OB_SUCCESS;
+  int64_t begin = 0;
+  int64_t batch_count = table_schemas.count() / THREAD_NUM;
+
+  std::vector<std::thread> ths;
+  ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_schemas.count(); ++i) {
+    if (table_schemas.count() == (i + 1) || (i + 1 - begin) >= batch_count) {
+      std::thread th([&, begin, i, cur_trace_id] () {
+        set_thread_name("create_schemas_add_columns_insert_memtable");
+        int ret = OB_SUCCESS;
+        ObCurTraceId::set(*cur_trace_id);
+        MTL_SWITCH(tenant_id) {
+          if (OB_FAIL(create_schemas_add_columns_insert_memtable(tenant_id, table_schemas, begin, i+1))) {
+            LOG_WARN("create_schemas_add_columns_insert_memtable failed", K(ret));
+          }
+        }
+      });
+      ths.push_back(std::move(th));
+      if (OB_SUCC(ret)) {
+        begin = i + 1;
+      }
+    }
+  }
+  for (auto &th : ths) {
+    th.join();
+  }
+  return ret;
+}
 
 int ObDDLService::create_schemas_add_columns_direct_load(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas)
 {
@@ -25578,10 +25612,8 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
     LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
   }
 
-  MTL_SWITCH(tenant_id) {
-    if (FAILEDx(create_schemas_add_columns_direct_load(tenant_id, next_round_tables))) {
-      LOG_WARN("create_schemas_add_columns_insert_memtable failed", KR(ret));
-    }
+  if (FAILEDx(parallel_create_schemas_add_columns_insert_memtable(tenant_id, next_round_tables))) {
+    LOG_WARN("create_schemas_add_columns_insert_memtable failed", KR(ret));
   }
 
   // core table
