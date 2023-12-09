@@ -208,6 +208,9 @@ public:
   int delete_row(const common::ObIArray<UpdateCell> &cells, int64_t &affected_rows);
   int supplement_cell(const UpdateCell &cell);
 
+  // choose the minimal non exist row_id (started with 0)
+  int generate_row_id(int64_t &row_id) const;
+
   TO_STRING_KV(K_(table_name), K_(load_for_update), K_(cur_idx), K_(all_row));
 private:
   int store_string(const common::ObString &src, common::ObString &dest);
@@ -233,9 +236,6 @@ private:
 
   // update %row
   int update_row_struct(const common::ObIArray<UpdateCell> &cells, Row &row);
-
-  // choose the minimal non exist row_id (started with 0)
-  int generate_row_id(int64_t &row_id) const;
 
 private:
   const char *table_name_;

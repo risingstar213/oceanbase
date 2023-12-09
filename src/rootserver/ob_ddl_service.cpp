@@ -24497,7 +24497,6 @@ public:
   ObInsertMemtableAddColumns() : table_param_(allocator_) {}
   int init(int table_id);
   int do_load(ObMySQLTransaction &trans);
-
   int append_row(ObNewRow &new_row);
 private:
   common::ObArenaAllocator allocator_;
@@ -24983,11 +24982,12 @@ int gen_column_dml_for_new_row(
       }
     }
     if (OB_SUCC(ret)) {
+      int64_t create_modify_timestamp = ObTimeUtility::current_time();
       cells[0].set_int(ObIntType, ObSchemaUtils::get_extract_tenant_id(exec_tenant_id, column.get_tenant_id()));
       cells[1].set_int(ObIntType, ObSchemaUtils::get_extract_schema_id(exec_tenant_id, column.get_table_id()));
       cells[2].set_int(ObIntType, column.get_column_id());
-      cells[3].set_timestamp(ObTimeUtility::current_time());
-      cells[4].set_timestamp(ObTimeUtility::current_time());
+      cells[3].set_timestamp(create_modify_timestamp);
+      cells[4].set_timestamp(create_modify_timestamp);
       cells[5].set_varchar(column.get_column_name());
       cells[6].set_int(ObIntType, column.get_rowkey_position());
       cells[7].set_int(ObIntType, column.get_index_position());
@@ -25058,6 +25058,260 @@ int gen_column_dml_for_new_row(
     }
     new_row.assign(idx_cells, 4);
     idx_col_name_load.append_row(new_row);
+  }
+
+  return ret;
+}
+
+inline int gen_core_cells_and_append(ObObj *obj, const char *table_name, int64_t &row_id, const char *column_name, ObObj &column_value, ObArenaAllocator &allocator, ObInsertMemtableAddColumns &core_load)
+{
+  int ret = OB_SUCCESS;
+
+  int64_t create_modify_timestamp = ObTimeUtility::current_time();
+  obj[0].set_varchar(table_name);
+  obj[1].set_int(row_id);
+  obj[2].set_varchar(column_name);
+  obj[3].set_timestamp(create_modify_timestamp);
+  obj[4].set_timestamp(create_modify_timestamp);
+
+
+  const char *varchar = NULL;
+  if (column_value.is_timestamp()) {
+    varchar = "now(6)";
+  } else if (column_value.is_string_type()) {
+    varchar = column_value.get_string_ptr();
+  } else if (column_value.is_int()) {
+    char *buf = (char *)allocator.alloc(20);
+    sprintf(buf, "%ld", column_value.get_int());
+    varchar = buf;
+  }
+  if (column_value.is_null()) {
+    obj[5].set_null();
+  } else {
+    obj[5].set_varchar(varchar);
+  }
+
+  ObNewRow new_row(obj, 6);
+  core_load.append_row(new_row);
+
+  return ret;
+}
+
+int gen_core_column_dml_for_new_row(
+  const uint64_t exec_tenant_id,
+  const char *table_name,
+  const ObColumnSchemaV2 &column,
+  int64_t &row_id,
+  ObInsertMemtableAddColumns &core_load,
+  ObInsertMemtableAddColumns &history_load)
+{
+  int ret = OB_SUCCESS;
+  ObString orig_default_value;
+  ObString cur_default_value;
+  ObArenaAllocator allocator(ObModIds::OB_SCHEMA_OB_SCHEMA_ARENA);
+  char *extended_type_info_buf = NULL;
+  uint64_t tenant_data_version = 0;
+  ObObj *cells = (ObObj *)allocator.alloc(sizeof(ObObj) * 33);
+  ObObj *history_cells = (ObObj *)allocator.alloc(sizeof(ObObj) * 33);
+  ObObj *core_cells = (ObObj *)allocator.alloc(sizeof(ObObj) * 6);
+  ObNewRow new_row;
+
+  if (OB_FAIL(GET_MIN_DATA_VERSION(exec_tenant_id, tenant_data_version))) {
+    LOG_WARN("get tenant data version failed", K(ret));
+  } else if (tenant_data_version < DATA_VERSION_4_2_0_0 &&
+             (column.is_xmltype() || column.get_udt_set_id() != 0 || column.get_sub_data_type() != 0)) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("tenant data version is less than 4.2, xmltype type is not supported", K(ret), K(tenant_data_version), K(column));
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "tenant data version is less than 4.2, xmltype");
+  } else if (tenant_data_version < DATA_VERSION_4_1_0_0 && ob_is_json(column.get_data_type())) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("tenant data version is less than 4.1, json type is not supported", K(ret), K(tenant_data_version), K(column));
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "tenant data version is less than 4.1, json type");
+  } else if (tenant_data_version < DATA_VERSION_4_1_0_0 &&
+             (ob_is_geometry(column.get_data_type()) ||
+             column.get_srs_id() != OB_DEFAULT_COLUMN_SRS_ID ||
+             column.is_spatial_generated_column())) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("tenant data version is less than 4.1, geometry type is not supported", K(ret), K(tenant_data_version), K(column));
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "tenant data version is less than 4.1, geometry type");
+  } else if (OB_FAIL(sql::ObSQLUtils::is_charset_data_version_valid(column.get_charset_type(),
+                                                                    exec_tenant_id))) {
+    LOG_WARN("failed to check charset data version valid", K(ret));
+  } else if (column.is_generated_column() ||
+      column.is_identity_column() ||
+      ob_is_string_type(column.get_data_type()) ||
+      ob_is_json(column.get_data_type()) ||
+      ob_is_geometry(column.get_data_type())) {
+    //The default value of the generated column is the expression definition of the generated column
+    ObString orig_default_value_str = column.get_orig_default_value().get_string();
+    ObString cur_default_value_str = column.get_cur_default_value().get_string();
+    orig_default_value.assign_ptr(orig_default_value_str.ptr(), orig_default_value_str.length());
+    cur_default_value.assign_ptr(cur_default_value_str.ptr(), cur_default_value_str.length());
+    if (!column.get_orig_default_value().is_null() && OB_ISNULL(orig_default_value.ptr())) {
+      orig_default_value.assign_ptr("", 0);
+    }
+    if (!column.get_cur_default_value().is_null() && OB_ISNULL(cur_default_value.ptr())) {
+      cur_default_value.assign_ptr("", 0);
+    }
+  } else {
+    const int64_t value_buf_len = 2 * OB_MAX_DEFAULT_VALUE_LENGTH + 3;
+    char *orig_default_value_buf = NULL;
+    char *cur_default_value_buf = NULL;
+    orig_default_value_buf = static_cast<char *>(allocator.alloc(value_buf_len));
+    cur_default_value_buf = static_cast<char *>(allocator.alloc(value_buf_len));
+    extended_type_info_buf = static_cast<char *>(allocator.alloc(OB_MAX_VARBINARY_LENGTH));
+    lib::Worker::CompatMode compat_mode = lib::Worker::CompatMode::INVALID;
+    if (OB_ISNULL(orig_default_value_buf)
+        || OB_ISNULL(cur_default_value_buf)
+        || OB_ISNULL(extended_type_info_buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("allocate memory for default value buffer failed");
+    } else if (OB_FAIL(ObCompatModeGetter::get_table_compat_mode(
+               column.get_tenant_id(), column.get_table_id(), compat_mode))) {
+      LOG_WARN("fail to get tenant mode", K(ret), K(column));
+    } else {
+      MEMSET(orig_default_value_buf, 0, value_buf_len);
+      MEMSET(cur_default_value_buf, 0, value_buf_len);
+      MEMSET(extended_type_info_buf, 0, OB_MAX_VARBINARY_LENGTH);
+
+      int64_t orig_default_value_len = 0;
+      int64_t cur_default_value_len = 0;
+      lib::CompatModeGuard compat_mode_guard(compat_mode);
+      ObTimeZoneInfo tz_info;
+      if (OB_FAIL(OTTZ_MGR.get_tenant_tz(exec_tenant_id, tz_info.get_tz_map_wrap()))) {
+        LOG_WARN("get tenant timezone failed", K(ret));
+      } else if (OB_FAIL(column.get_orig_default_value().print_plain_str_literal(
+                      orig_default_value_buf, value_buf_len, orig_default_value_len, &tz_info))) {
+        LOG_WARN("failed to print orig default value", K(ret),
+                 K(value_buf_len), K(orig_default_value_len));
+      } else if (OB_FAIL(column.get_cur_default_value().print_plain_str_literal(
+                             cur_default_value_buf, value_buf_len, cur_default_value_len, &tz_info))) {
+        LOG_WARN("failed to print cur default value",
+                 K(ret), K(value_buf_len), K(cur_default_value_len));
+      } else {
+        orig_default_value.assign_ptr(orig_default_value_buf, static_cast<int32_t>(orig_default_value_len));
+        cur_default_value.assign_ptr(cur_default_value_buf, static_cast<int32_t>(cur_default_value_len));
+      }
+      LOG_TRACE("begin gen_column_dml", K(ret), K(compat_mode), K(orig_default_value), K(cur_default_value),  K(orig_default_value_len), K(cur_default_value_len));
+    }
+  }
+  LOG_TRACE("begin gen_column_dml", K(ret), K(orig_default_value), K(cur_default_value), K(column));
+  if (OB_SUCC(ret)) {
+    ObString cur_default_value_v1;
+    if (column.get_orig_default_value().is_null()) {
+      orig_default_value.reset();
+    }
+    if (column.get_cur_default_value().is_null()) {
+      cur_default_value.reset();
+    }
+    ObString bin_extended_type_info;
+    if (OB_SUCC(ret) && column.is_enum_or_set()) {
+      int64_t pos = 0;
+      extended_type_info_buf = static_cast<char *>(allocator.alloc(OB_MAX_VARBINARY_LENGTH));
+      if (OB_ISNULL(extended_type_info_buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("allocate memory for default value buffer failed");
+      } else if (OB_FAIL(column.serialize_extended_type_info(extended_type_info_buf, OB_MAX_VARBINARY_LENGTH, pos))) {
+        LOG_WARN("fail to serialize_extended_type_info", K(ret));
+      } else {
+        bin_extended_type_info.assign_ptr(extended_type_info_buf, static_cast<int32_t>(pos));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      int64_t create_modify_timestamp = ObTimeUtility::current_time();
+      cells[0].set_int(ObIntType, ObSchemaUtils::get_extract_tenant_id(exec_tenant_id, column.get_tenant_id()));
+      cells[1].set_int(ObIntType, ObSchemaUtils::get_extract_schema_id(exec_tenant_id, column.get_table_id()));
+      cells[2].set_int(ObIntType, column.get_column_id());
+      cells[3].set_timestamp(create_modify_timestamp);
+      cells[4].set_timestamp(create_modify_timestamp);
+      cells[5].set_varchar(column.get_column_name());
+      cells[6].set_int(ObIntType, column.get_rowkey_position());
+      cells[7].set_int(ObIntType, column.get_index_position());
+      cells[8].set_int(ObIntType, column.get_order_in_rowkey());
+      cells[9].set_int(ObIntType, column.get_part_key_pos());
+      cells[10].set_int(ObIntType, column.get_data_type());
+      cells[11].set_int(ObIntType, column.get_data_length());
+      cells[12].set_int(ObIntType, column.get_data_precision());
+      cells[13].set_int(ObIntType, column.get_data_scale());
+      cells[14].set_int(ObIntType, column.is_zero_fill());
+      cells[15].set_int(ObIntType, column.is_nullable());
+      cells[16].set_int(ObIntType, column.is_on_update_current_timestamp());
+      cells[17].set_int(ObIntType, column.is_autoincrement());
+      cells[18].set_int(ObIntType, column.is_hidden());
+      cells[19].set_int(ObIntType, column.get_collation_type());
+      cells[20].set_null(); // orig default value
+      if (cur_default_value_v1.ptr() == NULL) {
+        cells[21].set_null(); // cur default value
+      } else {
+        cells[21].set_varchar(cur_default_value_v1);
+      }
+      if (column.get_comment() == NULL) {
+        cells[22].set_null();
+      } else {
+        cells[22].set_lob_value(ObLongTextType, column.get_comment(), strlen(column.get_comment()));
+      }
+      cells[23].set_int(ObIntType, column.get_schema_version());
+      cells[24].set_int(ObIntType, column.get_column_flags());
+      cells[25].set_int(ObIntType, column.get_prev_column_id());
+      if (bin_extended_type_info.ptr() == NULL) {
+        cells[26].set_null();
+      } else {
+        cells[26].set_varchar(bin_extended_type_info);
+      }
+      if (orig_default_value.ptr() == NULL) {
+        cells[27].set_null(); // orig default value v2
+      } else {
+        cells[27].set_varchar(orig_default_value);
+      }
+      if (cur_default_value.ptr() == NULL) {
+        cells[28].set_null(); // cur default value v2
+      } else {
+        cells[28].set_varchar(cur_default_value);
+      }
+      cells[29].set_int(ObIntType, column.get_srs_id());
+      cells[30].set_int(ObIntType, column.get_udt_set_id());
+      cells[31].set_int(ObIntType, column.get_sub_data_type());
+      cells[32].set_int(ObIntType, false); // is deleted
+    }
+
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "tenant_id",    cells[0], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "table_id",     cells[1], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "column_id",    cells[2], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "gmt_create",   cells[3], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "gmt_modified", cells[4], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "column_name",  cells[5], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "rowkey_position", cells[6], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "index_position",  cells[7], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "order_in_rowkey", cells[8], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "partition_key_position", cells[9], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "data_type",     cells[10], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "data_length",   cells[11], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "data_precision", cells[12], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "data_scale",   cells[13], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "zero_fill",    cells[14], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "nullable",   cells[15], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "on_update_current_timestamp", cells[16], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "autoincrement", cells[17], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "is_hidden",     cells[18], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "collation_type", cells[19], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "cur_default_value", cells[21], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "comment",        cells[22], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "schema_version", cells[23], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "column_flags",        cells[24], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "prev_column_id", cells[25], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "extended_type_info",    cells[26], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "orig_default_value_v2", cells[27], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "cur_default_value_v2",    cells[28], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "srs_id",              cells[29], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "udt_set_id",          cells[30], allocator, core_load);
+    gen_core_cells_and_append(core_cells, "__all_column", row_id, "sub_data_type",     cells[31], allocator, core_load);
+
+
+    for (int i = 0; i < 33; i++) {
+      history_cells[i] = cells[hist_idx_in_cells[i]];
+    }
+    new_row.assign(history_cells, 33);
+    history_load.append_row(new_row);
   }
 
   return ret;
@@ -25272,6 +25526,58 @@ int ObDDLService::create_schemas_add_columns_direct_load(uint64_t tenant_id, ObI
   return ret;
 }
 
+int ObDDLService::create_core_schemas_add_columns_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, ObMySQLTransaction &trans)
+{
+  int ret = OB_SUCCESS;
+  ObInsertMemtableAddColumns core_load;
+  ObInsertMemtableAddColumns history_load;
+
+  if (OB_FAIL(core_load.init(OB_ALL_CORE_TABLE_TID))) {
+    LOG_WARN("fail to init load unit", KR(ret));
+  } else if (OB_FAIL(history_load.init(OB_ALL_COLUMN_HISTORY_TID))) {
+    LOG_WARN("fail to init load unit", KR(ret));
+  }
+
+  ObDMLSqlSplicer dml;
+  ObCoreTableProxy kv(OB_ALL_COLUMN_TNAME, trans, tenant_id);
+  int64_t row_id;
+
+  if (OB_FAIL(kv.load())) {
+    LOG_WARN("failed to load kv", K(ret));
+  } else if (OB_FAIL(kv.generate_row_id(row_id))) {
+    LOG_WARN("failed to get row id");
+  }
+
+  const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
+  for (int i = 0; i < table_schemas.count(); i++) {
+    ObTableSchema &table = *table_schemas.at(i);
+    if (table.is_view_table() && !table.view_column_filled()) {
+      continue;
+    }
+    for (ObTableSchema::const_column_iterator iter = table.column_begin();
+      OB_SUCCESS == ret && iter != table.column_end(); ++iter) {
+      if (OB_ISNULL(*iter)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("iter is NULL", K(ret));
+      } else {
+        ObColumnSchemaV2 column = (**iter);
+        column.set_schema_version(table.get_schema_version());
+        column.set_tenant_id(table.get_tenant_id());
+        column.set_table_id(table.get_table_id());
+        gen_core_column_dml_for_new_row(exec_tenant_id, table.get_table_name(), column, row_id, core_load, history_load);
+        row_id += 1;
+      }
+    }
+  }
+
+  if (FAILEDx(core_load.do_load(trans))) {
+    LOG_WARN("failed to do load", KR(ret));
+  } else if (OB_FAIL(history_load.do_load(trans))) {
+    LOG_WARN("failed to do load for history", KR(ret));
+  }
+  return ret;
+}
+
 
 int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, const int64_t begin, const int64_t end, bool core_table)
 {
@@ -25311,6 +25617,14 @@ int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTable
           LOG_INFO("add table schema succeed", K(idx),
               "table_id", table.get_table_id(),
               "table_name", table.get_table_name(), "core_table", is_core_table(table.get_table_id()), "cost", end_time-start_time);
+        }
+      }
+
+      if (core_table) {
+        MTL_SWITCH(tenant_id) {
+          if (OB_FAIL(create_core_schemas_add_columns_insert_memtable(tenant_id, table_schemas, trans))) {
+            LOG_WARN("add core columns failed");
+          }
         }
       }
     }
