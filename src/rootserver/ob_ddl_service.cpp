@@ -24287,7 +24287,7 @@ int ObLoadSSTableWriter::close()
 
 class ObLoadDirectAddColumns {
 public:
-  int init(const ObTableSchema *schema);
+  int init(int64_t table_id);
   int add_item(const ObLoadDatumRow &row);
   int do_load();
 private:
@@ -24295,25 +24295,43 @@ private:
   common::ObArenaAllocator allocator_;
   blocksstable::ObStorageDatumUtils datum_utils_;
   ObLoadDatumRowCompare compare_;
+  common::ObSArray<ObColDesc> descs_;
   common::ObVector<const ObLoadDatumRow *> item_list_;
   ObLoadSSTableWriter sstable_writer_;
 
   ObSpinLock lock_;
 };
 
-int ObLoadDirectAddColumns::init(const ObTableSchema *schema)
+int ObLoadDirectAddColumns::init(int64_t table_id)
 {
   int ret = OB_SUCCESS;
-  allocator_.set_tenant_id(MTL_ID());
+  int tenant_id = MTL_ID();
+  allocator_.set_tenant_id(tenant_id);
+  ObSchemaGetterGuard schema_guard;
+  const ObTableSchema *schema = nullptr;
+  if (OB_FAIL(ObMultiVersionSchemaService::get_instance().get_tenant_schema_guard(tenant_id,
+                                                                                  schema_guard))) {
+    LOG_WARN("fail to get tenant schema guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(schema_guard.get_table_schema(tenant_id, table_id, schema))) {
+    LOG_WARN("fail to get table schema", KR(ret), K(tenant_id), K(table_id));
+  } else if (OB_ISNULL(schema)) {
+    ret = OB_TABLE_NOT_EXIST;
+    LOG_WARN("table not exist", KR(ret), K(tenant_id), K(table_id));
+    return ret;
+  }
+
   const int64_t rowkey_column_num = schema->get_rowkey_column_num();
   ObArray<ObColDesc> multi_version_column_descs;
   if (OB_FAIL(schema->get_multi_version_column_descs(multi_version_column_descs))) {
     LOG_WARN("fail to get multi version column descs", KR(ret));
   }
-  for (int i = 0; i < 3; i++) {
-    ObColDesc &desc = multi_version_column_descs.at(i);
-    LOG_INFO("row key descs", K(i), K(desc.col_id_), K(desc.col_type_));
+
+  if (OB_FAIL(schema->get_rowkey_column_ids(descs_))) {
+    LOG_WARN("fail to get row key column descs", KR(ret));
+  } else if (OB_FAIL(schema->get_column_ids_without_rowkey(descs_))) {
+    LOG_WARN("fail to without get row key column descs", KR(ret));
   }
+
   if (FAILEDx(datum_utils_.init(multi_version_column_descs, rowkey_column_num,
                                         is_oracle_mode(), allocator_))) {
     LOG_WARN("fail to init datum utils", KR(ret));
@@ -24374,17 +24392,38 @@ public:
   virtual int get_next_row(ObNewRow *&row) override;
   virtual void reset() override;
 
-  int append_row(const ObNewRow &row);
+  int init(common::ObSArray<ObColDesc> &descs);
+
+  int append_row(ObNewRow &row);
   common::ObVector<ObNewRow *> &get_item_list();
 private:
   int iter_count_ = 0;
   common::ObArenaAllocator allocator_;
+  common::ObSArray<ObColDesc> descs_;
   common::ObVector<ObNewRow *> item_list_;
 };
 
-int ObInsertMemtableIterator::append_row(const ObNewRow &row)
+int ObInsertMemtableIterator::init(common::ObSArray<ObColDesc> &descs)
+{
+  int ret = OB_SUCCESS;
+  for (int i = 0; i < descs.count(); i++) {
+    descs_.push_back(descs.at(i));
+  }
+  LOG_INFO("add descs", K(descs.count()));
+  return ret;
+}
+
+int ObInsertMemtableIterator::append_row(ObNewRow &row)
 {
   int ret = common::OB_SUCCESS;
+
+  for (int i = 0; i < row.get_count(); i++) {
+    if (row.get_cell(i).is_null()) {
+      continue;
+    }
+    row.get_cell(i).set_collation_type(descs_.at(i).col_type_.get_collation_type());
+    row.get_cell(i).set_collation_level(descs_.at(i).col_type_.get_collation_level());
+  }
   const int64_t item_size = sizeof(ObNewRow) + row.get_deep_copy_size();
   char *buf = NULL;
   ObNewRow *new_item = NULL;
@@ -24398,7 +24437,9 @@ int ObInsertMemtableIterator::append_row(const ObNewRow &row)
     int64_t buf_pos = sizeof(ObNewRow);
     if (OB_FAIL(new_item->deep_copy(row, buf, item_size, buf_pos))) {
       STORAGE_LOG(WARN, "fail to deep copy item", K(ret));
-    } else if (OB_FAIL(item_list_.push_back(new_item))) {
+    }
+    
+    if (FAILEDx(item_list_.push_back(new_item))) {
       STORAGE_LOG(WARN, "fail to push back new item", K(ret));
     }
   }
@@ -24432,33 +24473,52 @@ class ObInsertMemtableAddColumns
 {
 public:
   ObInsertMemtableAddColumns() : table_param_(allocator_) {}
-  int init(const ObTableSchema *schema);
+  int init(int table_id);
   int do_load(ObMySQLProxy *sql_proxy, int tenant_id);
 
-  int append_row(const ObNewRow &new_row);
+  int append_row(ObNewRow &new_row);
 private:
   common::ObArenaAllocator allocator_;
   ObInsertMemtableIterator row_iter_;
   ObSArray<uint64_t> column_ids_;
+  ObSArray<ObColDesc> descs_;
   ObTableDMLParam table_param_;
   common::ObTabletID tablet_id_;
   share::ObLSID ls_id_;
 };
 
-int ObInsertMemtableAddColumns::init(const ObTableSchema *schema)
+int ObInsertMemtableAddColumns::init(int table_id)
 {
   int ret = OB_SUCCESS;
+  int tenant_id = MTL_ID();
+  allocator_.set_tenant_id(tenant_id);
+  ObSchemaGetterGuard schema_guard;
+  const ObTableSchema *schema = nullptr;
+
+  if (OB_FAIL(ObMultiVersionSchemaService::get_instance().get_tenant_schema_guard(tenant_id,
+                                                                                  schema_guard))) {
+    LOG_WARN("fail to get tenant schema guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(schema_guard.get_table_schema(tenant_id, table_id, schema))) {
+    LOG_WARN("fail to get table schema", KR(ret), K(tenant_id), K(table_id));
+  } else if (OB_ISNULL(schema)) {
+    ret = OB_TABLE_NOT_EXIST;
+    LOG_WARN("table not exist", KR(ret), K(tenant_id), K(table_id));
+    return ret;
+  }
+
+
   tablet_id_ = schema->get_tablet_id();
 
-  ObArray<ObColDesc> multi_version_column_descs;
-  if (OB_FAIL(schema->get_rowkey_column_ids(multi_version_column_descs))) {
+  if (OB_FAIL(schema->get_rowkey_column_ids(descs_))) {
     LOG_WARN("fail to get row key column descs", KR(ret));
-  } else if (OB_FAIL(schema->get_column_ids_without_rowkey(multi_version_column_descs))) {
+  } else if (OB_FAIL(schema->get_column_ids_without_rowkey(descs_))) {
     LOG_WARN("fail to without get row key column descs", KR(ret));
+  } else if (OB_FAIL(row_iter_.init(descs_))) {
+    LOG_WARN("fail to init row iter", KR(ret));
   }
-  for (int i = 0; i < multi_version_column_descs.count(); i++) {
-    column_ids_.push_back(multi_version_column_descs.at(i).col_id_);
-    LOG_INFO("add col id", K(i), K(multi_version_column_descs.at(i).col_id_));
+  for (int i = 0; i < descs_.count(); i++) {
+    column_ids_.push_back(descs_.at(i).col_id_);
+    LOG_INFO("add col id", K(i), K(descs_.at(i).col_id_));
   }
 
   ls_id_ = 1;
@@ -24516,9 +24576,9 @@ int ObInsertMemtableAddColumns::do_load(ObMySQLProxy *sql_proxy, int tenant_id)
 
   ObDMLBaseParam dml_param;
   dml_param.timeout_ = ObTimeUtility::current_time() + 5 * 1000 * 1000;
+  dml_param.sql_mode_ = 4194304;
   dml_param.schema_version_ = 0;
   dml_param.tenant_schema_version_ = 2;
-  dml_param.write_flag_.set_is_insert_up();
   dml_param.table_param_ = &table_param_;
   dml_param.snapshot_.init_weak_read(MTL(transaction::ObTransService*)->get_tx_version_mgr().get_max_commit_ts(false/*elr*/));
 
@@ -24539,7 +24599,7 @@ int ObInsertMemtableAddColumns::do_load(ObMySQLProxy *sql_proxy, int tenant_id)
   return ret;
 }
 
-int ObInsertMemtableAddColumns::append_row(const ObNewRow &new_row)
+int ObInsertMemtableAddColumns::append_row(ObNewRow &new_row)
 {
   return row_iter_.append_row(new_row);
 }
@@ -24579,11 +24639,28 @@ const int64_t hist_idx_in_cells[33] {
     [31] = 30, // udt id
     [32] = 31, // sub data type
 };
+
+const int64_t tb_col_name_idx_in_cells[4] {
+  [0] = 1, // table id
+  [1] = 5, // column name
+  [2] = 0, // tenant id
+  [3] = 2, // column id
+};
+
+const int64_t col_name_idx_in_cells[4] {
+  [0] = 5, // column name
+  [1] = 0, // tenant id
+  [2] = 1, // table id
+  [3] = 2, // column id
+};
+
 int gen_column_dml_for_load_data_datum(
   const uint64_t exec_tenant_id,
   const ObColumnSchemaV2 &column,
   ObLoadDirectAddColumns &load,
-  ObLoadDirectAddColumns &history_load)
+  ObLoadDirectAddColumns &history_load,
+  ObLoadDirectAddColumns &idx_tb_col_name_load,
+  ObLoadDirectAddColumns &idx_col_name_load)
 {
   int ret = OB_SUCCESS;
   ObString orig_default_value;
@@ -24595,10 +24672,13 @@ int gen_column_dml_for_load_data_datum(
 
   ObLoadDatumRow row;
   ObLoadDatumRow history_row;
+  ObLoadDatumRow idx_row;
 
   if (OB_FAIL(row.init(32))) {
     LOG_WARN("fail to init datum row", KR(ret));
   } else if (OB_FAIL(history_row.init(33))) {
+    LOG_WARN("fail to init datum row", KR(ret));
+  } else if (OB_FAIL(idx_row.init(4))) {
     LOG_WARN("fail to init datum row", KR(ret));
   }
 
@@ -24777,6 +24857,24 @@ int gen_column_dml_for_load_data_datum(
       }
     }
     history_load.add_item(history_row);
+
+    for (int i = 0; i < 4; i++) {
+      const ObObj &src_obj = cells[tb_col_name_idx_in_cells[i]];
+      ObStorageDatum &dest_datum = idx_row.datums_[i];
+      if (OB_FAIL(dest_datum.from_obj_enhance(src_obj))) {
+        LOG_WARN("fail to from obj enhance", KR(ret), K(src_obj));
+      }
+    }
+    idx_tb_col_name_load.add_item(idx_row);
+
+    for (int i = 0; i < 4; i++) {
+      const ObObj &src_obj = cells[col_name_idx_in_cells[i]];
+      ObStorageDatum &dest_datum = idx_row.datums_[i];
+      if (OB_FAIL(dest_datum.from_obj_enhance(src_obj))) {
+        LOG_WARN("fail to from obj enhance", KR(ret), K(src_obj));
+      }
+    }
+    idx_col_name_load.add_item(idx_row);
   }
 
   return ret;
@@ -24786,7 +24884,9 @@ int gen_column_dml_for_new_row(
   const uint64_t exec_tenant_id,
   const ObColumnSchemaV2 &column,
   ObInsertMemtableAddColumns &load,
-  ObInsertMemtableAddColumns &history_load)
+  ObInsertMemtableAddColumns &history_load,
+  ObInsertMemtableAddColumns &idx_tb_col_name_load,
+  ObInsertMemtableAddColumns &idx_col_name_load)
 {
   int ret = OB_SUCCESS;
   ObString orig_default_value;
@@ -24796,6 +24896,7 @@ int gen_column_dml_for_new_row(
   uint64_t tenant_data_version = 0;
   ObObj *cells = (ObObj *)allocator.alloc(sizeof(ObObj) * 33);
   ObObj *history_cells = (ObObj *)allocator.alloc(sizeof(ObObj) * 33);
+  ObObj *idx_cells = (ObObj *)allocator.alloc(sizeof(ObObj) * 4);
   ObNewRow new_row;
 
   if (OB_FAIL(GET_MIN_DATA_VERSION(exec_tenant_id, tenant_data_version))) {
@@ -24963,20 +25064,38 @@ int gen_column_dml_for_new_row(
     }
     new_row.assign(history_cells, 33);
     history_load.append_row(new_row);
+
+    for (int i = 0; i < 4; i++) {
+      idx_cells[i] = cells[tb_col_name_idx_in_cells[i]];
+    }
+    new_row.assign(idx_cells, 4);
+    idx_tb_col_name_load.append_row(new_row);
+
+    for (int i = 0; i < 4; i++) {
+      idx_cells[i] = cells[col_name_idx_in_cells[i]];
+    }
+    new_row.assign(idx_cells, 4);
+    idx_col_name_load.append_row(new_row);
   }
 
   return ret;
 }
 
-int ObDDLService::create_schemas_add_columns_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, ObTableSchema* schema, ObTableSchema* history_schema)
+int ObDDLService::create_schemas_add_columns_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas)
 {
   int ret = OB_SUCCESS;
   ObInsertMemtableAddColumns load;
   ObInsertMemtableAddColumns history_load;
+  ObInsertMemtableAddColumns idx_tb_col_name_load;
+  ObInsertMemtableAddColumns idx_col_name_load;
 
-  if (OB_FAIL(load.init(schema))) {
+  if (OB_FAIL(load.init(OB_ALL_COLUMN_TID))) {
     LOG_WARN("fail to init load unit", KR(ret));
-  } else if (OB_FAIL(history_load.init(history_schema))) {
+  } else if (OB_FAIL(history_load.init(OB_ALL_COLUMN_HISTORY_TID))) {
+    LOG_WARN("fail to init load unit", KR(ret));
+  } else if (OB_FAIL(idx_tb_col_name_load.init(OB_ALL_COLUMN_IDX_TB_COLUMN_NAME_TID))) {
+    LOG_WARN("fail to init load unit", KR(ret));
+  } else if (OB_FAIL(idx_col_name_load.init(OB_ALL_COLUMN_IDX_COLUMN_NAME_TID))) {
     LOG_WARN("fail to init load unit", KR(ret));
   }
 
@@ -24996,7 +25115,7 @@ int ObDDLService::create_schemas_add_columns_insert_memtable(uint64_t tenant_id,
         column.set_schema_version(table.get_schema_version());
         column.set_tenant_id(table.get_tenant_id());
         column.set_table_id(table.get_table_id());
-        gen_column_dml_for_new_row(exec_tenant_id, column, load, history_load);
+        gen_column_dml_for_new_row(exec_tenant_id, column, load, history_load, idx_tb_col_name_load, idx_col_name_load);
       }
     }
   }
@@ -25006,20 +25125,30 @@ int ObDDLService::create_schemas_add_columns_insert_memtable(uint64_t tenant_id,
     LOG_WARN("failed to do load", KR(ret));
   } else if (OB_FAIL(history_load.do_load(sql_proxy_, tenant_id))) {
     LOG_WARN("failed to do load for history", KR(ret));
+  } else if (OB_FAIL(idx_tb_col_name_load.do_load(sql_proxy_, tenant_id))) {
+    LOG_WARN("failed to do load idx 1", KR(ret));
+  } else if (OB_FAIL(idx_col_name_load.do_load(sql_proxy_, tenant_id))) {
+    LOG_WARN("failed to do load idx 2", KR(ret));
   }
   return ret;
 }
 
 
-int ObDDLService::create_schemas_add_columns_direct_load(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, ObTableSchema* schema, ObTableSchema* history_schema)
+int ObDDLService::create_schemas_add_columns_direct_load(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas)
 {
   int ret = OB_SUCCESS;
   ObLoadDirectAddColumns load;
   ObLoadDirectAddColumns history_load;
+  ObLoadDirectAddColumns idx_tb_col_name_load;
+  ObLoadDirectAddColumns idx_col_name_load;
 
-  if (OB_FAIL(load.init(schema))) {
+  if (OB_FAIL(load.init(OB_ALL_COLUMN_TID))) {
     LOG_WARN("fail to init load unit", KR(ret));
-  } else if (OB_FAIL(history_load.init(history_schema))) {
+  } else if (OB_FAIL(history_load.init(OB_ALL_COLUMN_HISTORY_TID))) {
+    LOG_WARN("fail to init load unit", KR(ret));
+  } else if (OB_FAIL(idx_tb_col_name_load.init(OB_ALL_COLUMN_IDX_TB_COLUMN_NAME_TID))) {
+    LOG_WARN("fail to init load unit", KR(ret));
+  } else if (OB_FAIL(idx_col_name_load.init(OB_ALL_COLUMN_IDX_COLUMN_NAME_TID))) {
     LOG_WARN("fail to init load unit", KR(ret));
   }
 
@@ -25099,7 +25228,7 @@ int ObDDLService::create_schemas_add_columns_direct_load(uint64_t tenant_id, ObI
         column.set_schema_version(table.get_schema_version());
         column.set_tenant_id(table.get_tenant_id());
         column.set_table_id(table.get_table_id());
-        gen_column_dml_for_load_data_datum(exec_tenant_id, column, load, history_load);
+        gen_column_dml_for_load_data_datum(exec_tenant_id, column, load, history_load, idx_tb_col_name_load, idx_col_name_load);
       }
     }
   }
@@ -25108,6 +25237,10 @@ int ObDDLService::create_schemas_add_columns_direct_load(uint64_t tenant_id, ObI
     LOG_WARN("failed to do load", KR(ret));
   } else if (OB_FAIL(history_load.do_load())) {
     LOG_WARN("failed to do load for history", KR(ret));
+  } else if (OB_FAIL(idx_tb_col_name_load.do_load())) {
+    LOG_WARN("failed to do load idx 1", KR(ret));
+  } else if (OB_FAIL(idx_col_name_load.do_load())) {
+    LOG_WARN("failed to do load idx 2", KR(ret));
   }
 
   return ret;
@@ -25408,18 +25541,10 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   // bool wait_for_sync = enable_meta_user_parallel_ && is_user_tenant(tenant_id);
   // bool generate_sync = enable_meta_user_parallel_ && is_meta_tenant(tenant_id);
 
-  ObTableSchema all_column_schema;
-  ObTableSchema all_column_history_schema;
 
   std::unordered_map<uint64_t, ObTableSchema*> table_maps;
   for (int i = 0; i < table_schemas.count(); i++) {
     ObTableSchema &table = table_schemas.at(i);
-    if (table.get_table_id() == OB_ALL_COLUMN_TID) {
-      all_column_schema.assign(table);
-    }
-    if (table.get_table_id() == OB_ALL_COLUMN_HISTORY_TID) {
-      all_column_history_schema.assign(table);
-    }
     int64_t new_schema_version;
     if (OB_FAIL(schema_service_->gen_new_schema_version(tenant_id, new_schema_version))) {
       LOG_WARN("fail to gen new schema_version", K(ret), K(tenant_id));
@@ -25462,7 +25587,7 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   }
 
   MTL_SWITCH(tenant_id) {
-    if (FAILEDx(create_schemas_add_columns_insert_memtable(tenant_id, next_round_tables, &all_column_schema, &all_column_history_schema))) {
+    if (FAILEDx(create_schemas_add_columns_insert_memtable(tenant_id, next_round_tables))) {
       LOG_WARN("create_schemas_add_columns_insert_memtable failed", KR(ret));
     }
   }
