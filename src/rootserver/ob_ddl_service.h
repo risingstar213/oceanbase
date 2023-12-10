@@ -2071,7 +2071,8 @@ private:
   
   int create_schemas_add_columns_direct_load(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas);
   int create_core_schemas_add_columns_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas,  ObMySQLTransaction &trans);
-  int create_schemas_add_columns_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, int begin, int end);
+  int create_schemas_add_columns_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, int begin, int end, ObMySQLTransaction &trans);
+  int create_schemas_add_table_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, int begin, int end, ObMySQLTransaction &trans);
   int parallel_create_schemas_add_columns_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas);
   int parallel_create_schemas(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas);
   int parallel_create_schemas_with_core(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, ObIArray<ObTableSchema*> &core_table_schemas);
