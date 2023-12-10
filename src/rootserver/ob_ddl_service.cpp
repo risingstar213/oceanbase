@@ -22931,7 +22931,18 @@ int ObDDLService::broadcast_sys_table_schemas(
         LOG_WARN("fail to push back rs addr", KR(ret));
       }
     }
-    if (OB_SUCC(ret)) {
+    if (OB_SUCC(ret) && addrs.size() <= 1) {
+      int64_t sys_schema_version = OB_INVALID_VERSION;
+      if (OB_FAIL(schema_service_->get_tenant_refreshed_schema_version(
+          OB_SYS_TENANT_ID, sys_schema_version))) {
+      } else if (OB_FAIL(schema_service_->async_refresh_schema(
+                OB_SYS_TENANT_ID, sys_schema_version))) {
+        LOG_WARN("fail to refresh sys schema", KR(ret), K(sys_schema_version));
+      } else if (OB_FAIL(schema_service_->broadcast_tenant_schema(
+                tenant_id, tables))) {
+        LOG_WARN("fail to broadcast tenant schema", KR(ret), K(tenant_id), K(tables));
+      }
+    } else if (OB_SUCC(ret)) {
       ObTimeoutCtx ctx;
       ObBatchBroadcastSchemaProxy proxy(*rpc_proxy_,
                                         &ObSrvRpcProxy::batch_broadcast_schema);

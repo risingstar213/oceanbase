@@ -1047,6 +1047,20 @@ int ObBootstrap::broadcast_sys_schema(const ObSArray<ObTableSchema> &table_schem
   } else if (table_schemas.count() <= 0) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("table_schemas is empty", KR(ret), K(table_schemas));
+  } else if (rs_list_.size() <= 1) {
+    ObMultiVersionSchemaService *schema_service = GCTX.schema_service_;
+    const int64_t sys_schema_version = OB_CORE_SCHEMA_VERSION;
+    // LOG_INFO("start batch broadcast schema");
+    if (OB_ISNULL(schema_service)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("schema_service is null", KR(ret));
+    } else if (OB_FAIL(schema_service->async_refresh_schema(
+              OB_SYS_TENANT_ID, sys_schema_version))) {
+      LOG_WARN("fail to refresh sys schema", KR(ret), K(sys_schema_version));
+    } else if (OB_FAIL(schema_service->broadcast_tenant_schema(
+              OB_SYS_TENANT_ID, table_schemas))) {
+      LOG_WARN("fail to broadcast tenant schema", KR(ret), K(OB_SYS_TENANT_ID), K(table_schemas));
+    }
   } else if (OB_FAIL(arg.init(OB_SYS_TENANT_ID,
                               OB_CORE_SCHEMA_VERSION,
                               table_schemas))) {

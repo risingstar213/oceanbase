@@ -34,6 +34,8 @@
 #include "share/schema/ob_outline_mgr.h"
 #include "share/schema/ob_udt_mgr.h"
 
+#include <unordered_set>
+
 namespace oceanbase
 {
 using namespace common;

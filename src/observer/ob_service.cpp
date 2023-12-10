@@ -1445,7 +1445,7 @@ int ObService::bootstrap(const obrpc::ObBootstrapArg &arg)
           if (OB_RS_NOT_MASTER == ret) {
             BOOTSTRAP_LOG(INFO, "master root service not ready",
                           K(master_rs), "retry_count", i, K(rpc_timeout), K(ret));
-            USLEEP(10 * 1000);
+            USLEEP(2 * 1000);
           } else {
             const ObAddr rpc_svr = rpc_proxy.get_server();
             BOOTSTRAP_LOG(ERROR, "execute bootstrap fail", KR(ret), K(rpc_svr), K(master_rs), K(rpc_timeout));
@@ -1936,6 +1936,7 @@ int ObService::batch_broadcast_schema(
   int ret = OB_SUCCESS;
   ObMultiVersionSchemaService *schema_service = gctx_.schema_service_;
   const int64_t sys_schema_version = arg.get_sys_schema_version();
+  // LOG_INFO("start batch broadcast schema");
   if (!inited_) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", KR(ret));
