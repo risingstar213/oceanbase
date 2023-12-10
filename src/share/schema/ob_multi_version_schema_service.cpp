@@ -2395,6 +2395,7 @@ int ObMultiVersionSchemaService::async_refresh_schema(
     const int64_t MAX_RETRY_CNT = 100 * 1000 * 1000L / RETRY_IDLE_TIME; // 100s at most
     const int64_t SUBMIT_TASK_FREQUENCE = 2 * 1000 * 1000L / RETRY_IDLE_TIME; // each 2s
     while (OB_SUCC(ret)) {
+      LOG_INFO("check refreshed schema version");
       if (THIS_WORKER.is_timeout()
           || (INT64_MAX == THIS_WORKER.get_timeout_ts() && retry_cnt >= MAX_RETRY_CNT)) {
         ret = OB_TIMEOUT;

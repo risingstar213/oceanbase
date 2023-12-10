@@ -24663,6 +24663,8 @@ int ObInsertMemtableAddColumns::do_load(ObMySQLTransaction &trans)
   dml_param.tenant_schema_version_ = 2;
   dml_param.table_param_ = &table_param_;
   dml_param.snapshot_.init_weak_read(MTL(transaction::ObTransService*)->get_tx_version_mgr().get_max_commit_ts(false/*elr*/));
+  // dml_param.write_flag_.set_is_insert_up();
+  dml_param.snapshot_.init_none_read();
 
   ObAccessService *as = MTL(ObAccessService *);
   int64_t affect_rows;
@@ -25773,6 +25775,7 @@ const char *all_table_column_names[] = {
 int ObDDLService::create_schemas_add_table_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, int begin, int end, ObMySQLTransaction &trans)
 {
   int ret = OB_SUCCESS;
+  const int64_t start_time = ObTimeUtility::current_time();
   ObInsertMemtableAddColumns loads[6];
   int64_t table_ids[6] = { 
     OB_ALL_TABLE_TID, 
@@ -25790,7 +25793,26 @@ int ObDDLService::create_schemas_add_table_insert_memtable(uint64_t tenant_id, O
   const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
   for (int i = begin; i < end; i++) {
     ObTableSchema &table = *table_schemas.at(i);
-    gen_table_dml_for_new_row(exec_tenant_id, table, loads);
+    uint64_t data_version = 0;
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(GET_MIN_DATA_VERSION(tenant_id, data_version))) {
+      LOG_WARN("failed to get data version", K(ret));
+    } else if (table.is_view_table() && data_version >= DATA_VERSION_4_1_0_0
+              && !table.is_sys_view()
+              && !table.is_force_view() && table.get_column_count() <= 0) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get wrong view schema", K(ret), K(table));
+    } else if (data_version >= DATA_VERSION_4_1_0_0
+              && table.is_force_view()
+              && table.get_column_count() <= 0
+              && FALSE_IT(table.set_object_status(ObObjectStatus::INVALID))) {
+    } else if (table.is_view_table() && data_version >= DATA_VERSION_4_1_0_0
+              && table.get_column_count() > 0
+              && FALSE_IT(table.set_view_column_filled_flag(ObViewColumnFilledFlag::FILLED))) {
+
+    } else if (OB_FAIL(gen_table_dml_for_new_row(exec_tenant_id, table, loads))) {
+      LOG_WARN("insert table schema failed, ", K(ret), "table", to_cstring(table));
+    }
   }
 
   for (int i = 0; i < 6; i++) {
@@ -25799,6 +25821,8 @@ int ObDDLService::create_schemas_add_table_insert_memtable(uint64_t tenant_id, O
     }
   }
 
+   LOG_INFO("add tables", "time", ObTimeUtility::current_time() - start_time, K(end - begin));
+
   return ret;
 }
 
@@ -25806,6 +25830,9 @@ int ObDDLService::create_schemas_add_table_insert_memtable(uint64_t tenant_id, O
 int ObDDLService::create_schemas_add_columns_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas, int begin, int end, ObMySQLTransaction &trans)
 {
   int ret = OB_SUCCESS;
+
+  const int64_t start_time = ObTimeUtility::current_time();
+
   ObInsertMemtableAddColumns load;
   ObInsertMemtableAddColumns history_load;
   ObInsertMemtableAddColumns idx_tb_col_name_load;
@@ -25824,9 +25851,6 @@ int ObDDLService::create_schemas_add_columns_insert_memtable(uint64_t tenant_id,
   const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
   for (int i = begin; i < end; i++) {
     ObTableSchema &table = *table_schemas.at(i);
-    if (table.is_view_table() && !table.view_column_filled()) {
-      continue;
-    }
     for (ObTableSchema::const_column_iterator iter = table.column_begin();
       OB_SUCCESS == ret && iter != table.column_end(); ++iter) {
       if (OB_ISNULL(*iter)) {
@@ -25852,14 +25876,16 @@ int ObDDLService::create_schemas_add_columns_insert_memtable(uint64_t tenant_id,
     LOG_WARN("failed to do load idx 2", KR(ret));
   }
 
+  LOG_INFO("add columns", "time", ObTimeUtility::current_time() - start_time, K(end - begin));
+
   return ret;
 }
 
 int ObDDLService::parallel_create_schemas_add_columns_insert_memtable(uint64_t tenant_id, ObIArray<ObTableSchema*> &table_schemas)
 {
-  int THREAD_NUM = 8;
+  int THREAD_NUM = 4;
   if (is_sys_tenant(tenant_id)) {
-    THREAD_NUM = 16;
+    THREAD_NUM = 8;
   }
 
   int ret = OB_SUCCESS;
@@ -25870,7 +25896,17 @@ int ObDDLService::parallel_create_schemas_add_columns_insert_memtable(uint64_t t
   ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
   for (int64_t i = 0; OB_SUCC(ret) && i < table_schemas.count(); ++i) {
     if (table_schemas.count() == (i + 1) || (i + 1 - begin) >= batch_count) {
-      std::thread th([&, begin, i, cur_trace_id] () {
+      std::thread th1([&, begin, i, cur_trace_id] () {
+        set_thread_name("batch_create_schema_thread_with_std");
+        int ret = OB_SUCCESS;
+        ObCurTraceId::set(*cur_trace_id);
+        if (OB_FAIL(batch_create_schema_local(tenant_id, table_schemas, begin, i + 1))) {
+          LOG_WARN("batch create schema failed", K(ret), "table count", i + 1 - begin);
+        }
+        LOG_INFO("worker job", K(begin), K(i), K(i-begin), K(ret));
+      });
+      ths.push_back(std::move(th1));
+      std::thread th2([&, begin, i, cur_trace_id] () {
         set_thread_name("create_schemas_add_columns_insert_memtable");
         int ret = OB_SUCCESS;
         ObCurTraceId::set(*cur_trace_id);
@@ -25892,7 +25928,7 @@ int ObDDLService::parallel_create_schemas_add_columns_insert_memtable(uint64_t t
 
         }
       });
-      ths.push_back(std::move(th));
+      ths.push_back(std::move(th2));
       if (OB_SUCC(ret)) {
         begin = i + 1;
       }
@@ -26120,9 +26156,10 @@ int ObDDLService::batch_create_schema_local(uint64_t tenant_id, ObIArray<ObTable
         MTL_SWITCH(tenant_id) {
           if (FAILEDx(create_schemas_add_table_insert_memtable(tenant_id, table_schemas, begin, end, trans))) {
             LOG_WARN("add tables failed");
-          } else if (OB_FAIL(create_schemas_add_columns_insert_memtable(tenant_id, table_schemas, begin, end, trans))) {
-            LOG_WARN("add columns failed");
-          }
+          } 
+          // else if (OB_FAIL(create_schemas_add_columns_insert_memtable(tenant_id, table_schemas, begin, end, trans))) {
+          //   LOG_WARN("add columns failed");
+          // }
         }
       }
     }
@@ -26420,9 +26457,9 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   table_ids.insert(tmp_ids.begin(), tmp_ids.end());
 
   // all other tables
-  if (FAILEDx(parallel_create_schemas(tenant_id, next_round_tables))) {
-    LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
-  }
+  // if (FAILEDx(parallel_create_schemas(tenant_id, next_round_tables))) {
+  //   LOG_WARN("parallel_create_schemas_check_correlartion start one trip failed", KR(ret));
+  // }
 
   // MTL_SWITCH(tenant_id) {
   //   if (FAILEDx(create_schemas_add_table_insert_memtable(tenant_id, next_round_tables, 0, next_round_tables.count()))) {
@@ -26430,9 +26467,9 @@ int ObDDLService::parallel_create_schemas_check_correlartion(uint64_t tenant_id,
   //   }
   // }
 
-  // if (FAILEDx(parallel_create_schemas_add_columns_insert_memtable(tenant_id, next_round_tables))) {
-  //   LOG_WARN("create_schemas_add_columns_insert_memtable failed", KR(ret));
-  // }
+  if (FAILEDx(parallel_create_schemas_add_columns_insert_memtable(tenant_id, next_round_tables))) {
+    LOG_WARN("create_schemas_add_columns_insert_memtable failed", KR(ret));
+  }
 
   // core table
   if (FAILEDx(batch_create_schema_local(tenant_id, this_round_tables, 0, this_round_tables.count(), true))) {

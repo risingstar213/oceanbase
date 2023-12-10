@@ -2753,9 +2753,11 @@ int ObTableSqlService::create_table_for_create_schemas(ObTableSchema &table,
   } else if (data_version >= DATA_VERSION_4_1_0_0
              && table.is_force_view()
              && table.get_column_count() <= 0
+             && is_core_table(table.get_table_id())
              && FALSE_IT(table.set_object_status(ObObjectStatus::INVALID))) {
   } else if (table.is_view_table() && data_version >= DATA_VERSION_4_1_0_0
              && table.get_column_count() > 0
+             && is_core_table(table.get_table_id())
              && FALSE_IT(table.set_view_column_filled_flag(ObViewColumnFilledFlag::FILLED))) {
   } else if (is_core_table(table.get_table_id()) && OB_FAIL(add_table(sql_client, table, update_object_status_ignore_version, only_history))) {
     LOG_WARN("insert table schema failed, ", K(ret), "table", to_cstring(table));
