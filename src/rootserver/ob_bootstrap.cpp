@@ -151,6 +151,7 @@ int ObBaseBootstrap::check_bootstrap_rs_list(
   if (rs_list.count() <= 0) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("rs_list size must larger than 0", K(ret));
+  } else if (rs_list_.count() <= 1) {
   } else {
     if (OB_FAIL(check_multiple_zone_deployment_rslist(rs_list))) {
       LOG_WARN("fail to check multiple zone deployment rslist", K(ret));
@@ -443,6 +444,7 @@ int ObPreBootstrap::check_all_server_bootstrap_mode_match(
 
   if (OB_FAIL(check_inner_stat())) {
     LOG_WARN("fail to check inner stat", K(ret));
+  } else if (rs_list_.count() <= 1) {
   } else {
     ObCheckDeploymentModeArg arg;
     arg.single_zone_deployment_on_ = OB_FILE_SYSTEM_ROUTER.is_single_zone_deployment_on();
@@ -469,6 +471,16 @@ int ObPreBootstrap::check_is_all_server_empty(bool &is_empty)
 
   if (OB_FAIL(check_inner_stat())) {
     LOG_WARN("check_inner_stat failed", K(ret));
+  } else if (rs_list_.count() <= 1) {
+    ObCheckServerEmptyArg arg(ObCheckServerEmptyArg::BOOTSTRAP,
+                              DATA_CURRENT_VERSION);
+    if (OB_FAIL(GCTX.ob_service_->is_empty_server(arg, is_server_empty))) {
+      LOG_WARN("failed to check if server is empty");
+    } else if (!is_server_empty) {
+      // don't need to set ret
+      LOG_WARN("server is not empty");
+      is_empty = false;
+    }
   } else {
     ObCheckServerEmptyArg arg(ObCheckServerEmptyArg::BOOTSTRAP,
                               DATA_CURRENT_VERSION);
