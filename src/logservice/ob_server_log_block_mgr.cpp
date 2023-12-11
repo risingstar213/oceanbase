@@ -33,6 +33,8 @@
 #include "share/ob_errno.h"                     // errno
 #include "logservice/ob_log_service.h"          // ObLogService
 #include "logservice/palf/log_io_utils.h"       // renameat_with_retry
+
+#include <thread>
 namespace oceanbase
 {
 using namespace palf;
@@ -1091,20 +1093,50 @@ int ObServerLogBlockMgr::allocate_blocks_at_tmp_dir_(const FileDesc &dir_fd,
   int ret = OB_SUCCESS;
   int64_t remain_block_cnt = block_cnt;
   block_id_t block_id = start_block_id;
-  while (OB_SUCC(ret) && remain_block_cnt > 0) {
-    if (OB_FAIL(allocate_block_at_tmp_dir_(dir_fd, block_id))) {
-      CLOG_LOG(ERROR, "allocate_block_at_tmp_dir_ failed", K(ret), KPC(this), K(dir_fd),
+
+  // 假设全分配成功
+  block_id_t end_block_id = start_block_id + block_cnt;
+  int THREAD_NUM = 4;
+  std::vector<std::thread> ths;
+  ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
+  for (int i = 0; i < THREAD_NUM; i++) {
+    std::thread th([&, i]() {
+      set_thread_name("allocate_blocks_at_tmp_dir");
+      int ret = OB_SUCCESS;
+      ObCurTraceId::set(*cur_trace_id);
+      block_id_t local_block_id = start_block_id + i;
+      while (local_block_id < end_block_id && OB_SUCC(ret)) {
+        if (OB_FAIL(allocate_block_at_tmp_dir_(dir_fd, local_block_id))) {
+          CLOG_LOG(ERROR, "allocate_block_at_tmp_dir_ failed", K(ret), KPC(this), K(dir_fd),
                K(block_id));
-    } else {
-      remain_block_cnt--;
-      block_id++;
-    }
+        } else {
+          local_block_id += THREAD_NUM;
+        }
+      }
+    });
+
+    ths.push_back(std::move(th));
   }
-  if (-1 == ::fsync(dir_fd)) {
-    int tmp_ret = convert_sys_errno();
-    CLOG_LOG(ERROR, "::fsync failed", K(ret), K(tmp_ret), KPC(this), K(dir_fd));
-    ret = (OB_SUCCESS == ret ? tmp_ret : ret);
+
+  for (auto &th : ths) {
+    th.join();
   }
+  
+
+  // while (OB_SUCC(ret) && remain_block_cnt > 0) {
+  //   if (OB_FAIL(allocate_block_at_tmp_dir_(dir_fd, block_id))) {
+  //     CLOG_LOG(ERROR, "allocate_block_at_tmp_dir_ failed", K(ret), KPC(this), K(dir_fd),
+  //              K(block_id));
+  //   } else {
+  //     remain_block_cnt--;
+  //     block_id++;
+  //   }
+  // }
+  // if (-1 == ::fsync(dir_fd)) {
+  //   int tmp_ret = convert_sys_errno();
+  //   CLOG_LOG(ERROR, "::fsync failed", K(ret), K(tmp_ret), KPC(this), K(dir_fd));
+  //   ret = (OB_SUCCESS == ret ? tmp_ret : ret);
+  // }
   return ret;
 }
 
