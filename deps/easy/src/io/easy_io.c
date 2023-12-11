@@ -37,6 +37,37 @@ static void easy_listen_close(easy_listen_t *l);
 
 int ob_pthread_create(void **ptr, void *(*start_routine) (void *), void *arg);
 void ob_pthread_join(void *ptr);
+void easy_global_ratelimitor_init(int io_thread_count)
+{
+    int                     i;
+    easy_pool_t             *pool;
+    int                     v;
+    if ((pool = easy_pool_create(0)) == NULL) {
+        return;
+    }
+
+    easy_spin_lock(&(global_ratelimitor.rl_lock));
+    if (global_ratelimitor.inited == 0) {
+        global_ratelimitor.cpu_freq          = easy_get_cpu_mhz(1) * 1000 * 1000;
+        global_ratelimitor.cycles_per_period = (uint64_t) global_ratelimitor.cpu_freq * global_ratelimitor.stat_period;
+        global_ratelimitor.cycles_per_stride = global_ratelimitor.cycles_per_period / RL_RECORD_RING_SIZE;
+
+        easy_list_init(&global_ratelimitor.ready_queue);
+
+        v = offsetof(easy_region_ratelimitor_t, hash_list_node);
+        global_ratelimitor.s2r_hmap     = easy_hash_create(pool, EASY_MAX_CLIENT_CNT / io_thread_count, v);
+        global_ratelimitor.region_array = easy_array_create(sizeof(easy_region_ratelimitor_hmap_node_t));
+        for (i = 0; i < RL_MAX_REGION_COUNT; i++) {
+            memset(&(global_ratelimitor.region_rlmtrs[i]), 0, sizeof(easy_region_ratelimitor_t));
+            global_ratelimitor.region_rlmtrs[i].region_id = -1;
+        }
+    }
+    global_ratelimitor.inited = 1;
+    easy_info_log("global_ratelimitor inited, stat_period(%lf), cpu_freq(%lf), cycles_per_period(%ld)",
+            global_ratelimitor.stat_period, global_ratelimitor.cpu_freq, global_ratelimitor.cycles_per_period);
+    easy_spin_unlock(&(global_ratelimitor.rl_lock));
+}
+
 /**
  * 初始化easy_io
  */

@@ -17,6 +17,7 @@ EASY_CPP_START
 // 接口函数
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // easy_io_t
+extern                     void easy_global_ratelimitor_init(int io_thread_count);
 extern easy_io_t           *easy_eio_create(easy_io_t *eio, int io_thread_count);
 extern int                  easy_eio_start(easy_io_t *eio);
 extern int                  easy_eio_wait(easy_io_t *eio);

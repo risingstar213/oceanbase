@@ -70,6 +70,7 @@ global:
     easy_connection_write_again;
     easy_connection_write_socket;
     easy_default_loop_ptr;
+    void easy_global_ratelimitor_init;
     easy_eio_create;
     easy_eio_destroy;
     easy_eio_set_uthread_start;

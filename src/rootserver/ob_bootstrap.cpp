@@ -130,7 +130,7 @@ int ObBaseBootstrap::check_multiple_zone_deployment_rslist(
   //and it will throw exception if there are duplicate zones
   for (int64_t i = 0; OB_SUCC(ret) && i < rs_list.count(); ++i) {
     const ObZone &zone = rs_list[i].zone_;
-    for (int64_t j = 0; OB_SUCC(ret) && j < rs_list.count(); ++j) {
+    for (int64_t j = i+1; OB_SUCC(ret) && j < rs_list.count(); ++j) {
       if (i != j) {
         if (zone == rs_list[j].zone_) {
           ret = OB_PARTITION_ZONE_DUPLICATED;

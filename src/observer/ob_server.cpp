@@ -120,6 +120,8 @@
 #include "lib/xml/ob_libxml2_sax_handler.h"
 #endif
 
+#include "io/easy_io.h"
+
 using namespace oceanbase::lib;
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -286,6 +288,16 @@ int ObServer::init(const ObServerOptions &opts, const ObPLogWriterCfg &log_cfg)
     FLOG_INFO("end init observer in arbitration mode", KR(ret));
 #endif
   } else {
+    int th_ret;
+    std::thread th([&](){
+      int ret = OB_SUCCESS;
+      int io_cnt = static_cast<int>(GCONF.net_thread_count);
+      easy_global_ratelimitor_init(io_cnt);
+      LOG_INFO("init easy global ratelimitor successfully");
+      ATOMIC_SET(&th_ret, ret);
+    });
+
+
     if (FAILEDx(OB_LOGGER.init(log_cfg, false))) {
       LOG_ERROR("async log init error.", KR(ret));
       ret = OB_ELECTION_ASYNC_LOG_WARN_INIT;
@@ -339,6 +351,13 @@ int ObServer::init(const ObServerOptions &opts, const ObPLogWriterCfg &log_cfg)
       LOG_ERROR("fail to init schema status proxy", KR(ret));
     } else if (OB_FAIL(init_schema())) {
       LOG_ERROR("init schema failed", KR(ret));
+    }
+
+    th.join();
+    if (OB_SUCC(ret)) {
+      ret = th_ret;
+    }
+    if (OB_FAIL(ret)) {
     } else if (OB_FAIL(init_network())) {
       LOG_ERROR("init network failed", KR(ret));
     } else if (OB_FAIL(init_interrupt())) {

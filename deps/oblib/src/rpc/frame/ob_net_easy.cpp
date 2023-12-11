@@ -180,7 +180,7 @@ easy_io_t * ObNetEasy::create_eio_(const int thread_num, uint64_t magic, uint8_t
   } else {
     eio->negotiation_enable = negotiation_enable;
     eio->magic = magic;
-    LOG_INFO("create eio success");
+    LOG_INFO("create eio success", K(eio->start_time));
   }
   (void) ret; // make compiler happy
   LOG_INFO("create eio success", K(thread_num), KCSTRING(lbt()));
@@ -682,6 +682,7 @@ static void mysql_easy_timer_cb(EV_P_ ev_timer *w, int revents)
 
 int ObNetEasy::init(const ObNetOptions &opts, uint8_t negotiation_enable)
 {
+  LOG_INFO(" ObNetEasy::init start");
   int ret = OB_SUCCESS;
   const int64_t EASY_STAT_INTERVAL = 1; // 1s
   const int64_t MYSQL_UNIX_IOTH_COUNT = 1;

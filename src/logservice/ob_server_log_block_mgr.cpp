@@ -1096,7 +1096,7 @@ int ObServerLogBlockMgr::allocate_blocks_at_tmp_dir_(const FileDesc &dir_fd,
 
   // 假设全分配成功
   block_id_t end_block_id = start_block_id + block_cnt;
-  int THREAD_NUM = 4;
+  int THREAD_NUM = 8;
   std::vector<std::thread> ths;
   ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
   for (int i = 0; i < THREAD_NUM; i++) {
